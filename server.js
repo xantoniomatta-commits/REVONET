@@ -198,7 +198,115 @@ app.post('/api/servers/create', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+// === DM ROUTES ===
 
+// Get user's DM conversations
+app.get('/api/dm/conversations', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ error: 'User ID required' });
+    
+    const conversations = await conversationsCollection.find({
+      participants: new ObjectId(userId)
+    }).toArray();
+    
+    // Get last message and other participant info
+    const enriched = await Promise.all(conversations.map(async (conv) => {
+      const otherUserId = conv.participants.find(id => id.toString() !== userId);
+      const otherUser = await usersCollection.findOne({ _id: otherUserId });
+      const lastMsg = await dmMessagesCollection.findOne(
+        { conversationId: conv._id },
+        { sort: { timestamp: -1 } }
+      );
+      return {
+        ...conv,
+        otherUser: { id: otherUser._id, username: otherUser.username },
+        lastMessage: lastMsg
+      };
+    }));
+    
+    res.json({ conversations: enriched });
+  } catch (error) {
+    console.error('Get conversations error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Start or get DM with another user
+app.post('/api/dm/create', async (req, res) => {
+  try {
+    const { userId, targetUserId } = req.body;
+    if (!userId || !targetUserId) {
+      return res.status(400).json({ error: 'Both user IDs required' });
+    }
+    
+    const userObjId = new ObjectId(userId);
+    const targetObjId = new ObjectId(targetUserId);
+    
+    // Check if conversation already exists
+    let conv = await conversationsCollection.findOne({
+      participants: { $all: [userObjId, targetObjId] }
+    });
+    
+    if (!conv) {
+      const result = await conversationsCollection.insertOne({
+        participants: [userObjId, targetObjId],
+        createdAt: new Date()
+      });
+      conv = { _id: result.insertedId, participants: [userObjId, targetObjId] };
+    }
+    
+    res.json({ conversationId: conv._id });
+  } catch (error) {
+    console.error('Create DM error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get messages for a conversation
+app.get('/api/dm/messages', async (req, res) => {
+  try {
+    const { conversationId } = req.query;
+    if (!conversationId) return res.status(400).json({ error: 'Conversation ID required' });
+    
+    const messages = await dmMessagesCollection.find({
+      conversationId: new ObjectId(conversationId)
+    }).sort({ timestamp: 1 }).limit(100).toArray();
+    
+    res.json({ messages });
+  } catch (error) {
+    console.error('Get DM messages error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Send DM
+app.post('/api/dm/send', async (req, res) => {
+  try {
+    const { conversationId, senderId, senderName, content } = req.body;
+    if (!conversationId || !senderId || !content) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    
+    const message = {
+      conversationId: new ObjectId(conversationId),
+      senderId: new ObjectId(senderId),
+      senderName,
+      content,
+      timestamp: new Date(),
+      readBy: [new ObjectId(senderId)]
+    };
+    
+    await dmMessagesCollection.insertOne(message);
+    
+    // Broadcast to WebSocket (we'll add this later)
+    
+    res.json({ success: true, message });
+  } catch (error) {
+    console.error('Send DM error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
 // === WebSocket for Real-Time ===
 wss.on('connection', (ws) => {
   console.log('📡 New WebSocket connection');
