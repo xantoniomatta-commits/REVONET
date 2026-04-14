@@ -25,28 +25,15 @@ async function connectToDatabase() {
     const client = new MongoClient(MONGODB_URI);
     await client.connect();
     db = client.db(DB_NAME);
-    usersCollection = db.collection(USERS_COLLECTION);
-    serversCollection = db.collection(SERVERS_COLLECTION);
-    console.log(`✅ Connected to MongoDB: ${DB_NAME}`);
-  } catch (error) {
-    console.error('❌ MongoDB connection failed:', error);
-    process.exit(1);
-  }
-  async function connectToDatabase() {
-  try {
-    const client = new MongoClient(MONGODB_URI);
-    await client.connect();
-    db = client.db(DB_NAME);
     usersCollection = db.collection('users');
     serversCollection = db.collection('servers');
-    conversationsCollection = db.collection('conversations');  // ← ADD THIS
-    dmMessagesCollection = db.collection('dm_messages');      // ← ADD THIS
+    conversationsCollection = db.collection('conversations');
+    dmMessagesCollection = db.collection('dm_messages');
     console.log(`✅ Connected to MongoDB: ${DB_NAME}`);
   } catch (error) {
     console.error('❌ MongoDB connection failed:', error);
     process.exit(1);
   }
-}
 }
 
 // === Middleware ===
