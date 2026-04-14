@@ -13,18 +13,10 @@ const PORT = process.env.PORT || 8080;
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// MongoDB Setup
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://Zenith:ZenZone1@revonet.j86zjlv.mongodb.net/?retryWrites=true&w=majority&appName=REVONET';
 const DB_NAME = 'revonet';
 
-let db;
-let usersCollection;
-let serversCollection;
-let serverMessagesCollection;
-let conversationsCollection;
-let dmMessagesCollection;
-let friendsCollection;
-let notificationsCollection;
+let db, usersCollection, serversCollection, serverMessagesCollection, conversationsCollection, dmMessagesCollection, friendsCollection, notificationsCollection;
 
 async function connectToDatabase() {
   try {
@@ -45,7 +37,6 @@ async function connectToDatabase() {
   }
 }
 
-// WebSocket State
 const clients = new Map();
 const userSockets = new Map();
 
@@ -57,35 +48,29 @@ wss.on('connection', (ws) => {
     try {
       const msg = JSON.parse(data);
       
-      // === AUTHENTICATION ===
       if (msg.type === 'auth') {
         userId = msg.userId;
         userSockets.set(userId, ws);
         clients.set(ws, { userId });
         console.log(`📡 User ${userId} connected`);
-        
-        // Send online status to friends
         broadcastUserStatus(userId, 'online');
       }
       
-      // === JOIN CHANNEL ===
       else if (msg.type === 'join_channel' && userId) {
         currentChannelId = msg.channelId;
         console.log(`📺 User ${userId} joined channel ${currentChannelId}`);
         
-        // Send recent messages
         if (serverMessagesCollection) {
           const messages = await serverMessagesCollection.find({ 
-            channelId: channelId
+            channelId: currentChannelId
           }).sort({ timestamp: -1 }).limit(50).toArray();
           ws.send(JSON.stringify({ type: 'history', messages: messages.reverse() }));
         }
       }
       
-      // === SEND MESSAGE (Normal Server) ===
       else if (msg.type === 'chat' && userId && currentChannelId) {
         const message = {
-          channelId: new ObjectId(currentChannelId),
+          channelId: currentChannelId,
           senderId: new ObjectId(userId),
           senderName: msg.senderName,
           content: msg.content,
@@ -100,10 +85,8 @@ wss.on('connection', (ws) => {
         const result = await serverMessagesCollection.insertOne(message);
         message._id = result.insertedId;
         
-        // Broadcast to all users in this channel
         broadcastToChannel(currentChannelId, { type: 'message', message });
         
-        // Send notifications for mentions
         message.mentions.forEach(async (username) => {
           const user = await usersCollection.findOne({ username });
           if (user && user._id.toString() !== userId) {
@@ -119,7 +102,6 @@ wss.on('connection', (ws) => {
         });
       }
       
-      // === EDIT MESSAGE ===
       else if (msg.type === 'edit_message' && userId) {
         await serverMessagesCollection.updateOne(
           { _id: new ObjectId(msg.messageId), senderId: new ObjectId(userId) },
@@ -128,7 +110,6 @@ wss.on('connection', (ws) => {
         broadcastToChannel(msg.channelId, { type: 'message_edited', messageId: msg.messageId, content: msg.content });
       }
       
-      // === DELETE MESSAGE ===
       else if (msg.type === 'delete_message' && userId) {
         await serverMessagesCollection.updateOne(
           { _id: new ObjectId(msg.messageId), senderId: new ObjectId(userId) },
@@ -137,7 +118,6 @@ wss.on('connection', (ws) => {
         broadcastToChannel(msg.channelId, { type: 'message_deleted', messageId: msg.messageId });
       }
       
-      // === TYPING INDICATOR ===
       else if (msg.type === 'typing' && userId) {
         broadcastToChannel(msg.channelId, { type: 'typing', userId, username: msg.username }, ws);
       }
@@ -186,7 +166,6 @@ function extractMentions(content) {
 
 // === API ROUTES ===
 
-// Auth
 app.post('/api/register', async (req, res) => {
   try {
     const { email, password, username } = req.body;
@@ -229,17 +208,13 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// Servers
-app.get('/api/channels/:channelId/messages', async (req, res) => {
+app.get('/api/servers', async (req, res) => {
   try {
-    const { channelId } = req.params;
-    const messages = await serverMessagesCollection.find({ 
-      channelId: channelId,  // ← Just use the string directly
-      deleted: { $ne: true }
-    }).sort({ timestamp: -1 }).limit(100).toArray();
-    res.json({ messages: messages.reverse() });
+    const { userId } = req.query;
+    const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
+    const servers = await serversCollection.find({ _id: { $in: user.servers || [] } }).toArray();
+    res.json({ servers });
   } catch (error) {
-    console.error('Error loading messages:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -269,8 +244,8 @@ app.post('/api/servers/create', async (req, res) => {
       name, inviteCode: code, ownerId: new ObjectId(userId),
       members: [new ObjectId(userId)],
       channels: [
-        { name: 'welcome', type: 'text' },
-        { name: 'general', type: 'text' }
+        { _id: new ObjectId(), name: 'welcome', type: 'text' },
+        { _id: new ObjectId(), name: 'general', type: 'text' }
       ],
       createdAt: new Date()
     });
@@ -282,16 +257,16 @@ app.post('/api/servers/create', async (req, res) => {
   }
 });
 
-// Channel Messages
 app.get('/api/channels/:channelId/messages', async (req, res) => {
   try {
     const { channelId } = req.params;
     const messages = await serverMessagesCollection.find({ 
-      channelId: new ObjectId(channelId),
+      channelId: channelId,
       deleted: { $ne: true }
     }).sort({ timestamp: -1 }).limit(100).toArray();
     res.json({ messages: messages.reverse() });
   } catch (error) {
+    console.error('Error loading messages:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -468,7 +443,6 @@ app.post('/api/dm/send', async (req, res) => {
     
     await dmMessagesCollection.insertOne(message);
     
-    // Notify recipient via WebSocket
     const conv = await conversationsCollection.findOne({ _id: new ObjectId(conversationId) });
     const recipientId = conv.participants.find(id => id.toString() !== senderId);
     notifyUser(recipientId.toString(), { type: 'dm', message });
@@ -479,12 +453,10 @@ app.post('/api/dm/send', async (req, res) => {
   }
 });
 
-// File Upload (placeholder - implement with Cloudinary)
 app.post('/api/upload', (req, res) => {
   res.json({ url: 'https://via.placeholder.com/150', type: 'image/png' });
 });
 
-// Start Server
 async function start() {
   await connectToDatabase();
   server.listen(PORT, () => {
