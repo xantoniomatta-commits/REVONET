@@ -48,16 +48,13 @@ app.post('/api/register', async (req, res) => {
       return res.status(400).json({ error: 'All fields required' });
     }
     
-    // Check if user already exists
     const existing = await usersCollection.findOne({ email: email.toLowerCase() });
     if (existing) {
       return res.status(400).json({ error: 'Email already registered' });
     }
     
-    // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
     
-    // Create user
     const result = await usersCollection.insertOne({
       email: email.toLowerCase(),
       password: hashedPassword,
@@ -82,26 +79,23 @@ app.post('/api/login', async (req, res) => {
       return res.status(400).json({ error: 'Email and password required' });
     }
     
-    // Find user
     const user = await usersCollection.findOne({ email: email.toLowerCase() });
     if (!user) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
     
-    // Check password
     const validPassword = await bcrypt.compare(password, user.password);
     if (!validPassword) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
     
-    // Return user data (never return password)
     res.json({
       success: true,
       user: {
         id: user._id,
         email: user.email,
         username: user.username,
-        servers: user.servers
+        servers: user.servers || []
       }
     });
   } catch (error) {
@@ -119,7 +113,6 @@ app.get('/api/user/servers', async (req, res) => {
     const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
     if (!user) return res.status(404).json({ error: 'User not found' });
     
-    // Get full server details for each server ID
     const serverIds = user.servers || [];
     const servers = await serversCollection.find({ _id: { $in: serverIds } }).toArray();
     
@@ -139,7 +132,6 @@ app.post('/api/servers/join', async (req, res) => {
       return res.status(400).json({ error: 'User ID and invite code required' });
     }
     
-    // Find server by invite code
     const server = await serversCollection.findOne({ inviteCode: inviteCode.toUpperCase() });
     if (!server) {
       return res.status(404).json({ error: 'Invalid invite code' });
@@ -147,19 +139,16 @@ app.post('/api/servers/join', async (req, res) => {
     
     const userObjectId = new ObjectId(userId);
     
-    // Check if user already in server
     const user = await usersCollection.findOne({ _id: userObjectId });
-    if (user.servers && user.servers.includes(server._id)) {
+    if (user.servers && user.servers.some(id => id.toString() === server._id.toString())) {
       return res.status(400).json({ error: 'Already a member of this server' });
     }
     
-    // Add user to server's members
     await serversCollection.updateOne(
       { _id: server._id },
       { $addToSet: { members: userObjectId } }
     );
     
-    // Add server to user's servers
     await usersCollection.updateOne(
       { _id: userObjectId },
       { $addToSet: { servers: server._id } }
@@ -183,10 +172,8 @@ app.post('/api/servers/create', async (req, res) => {
     
     const userObjectId = new ObjectId(userId);
     
-    // Generate invite code if not provided
     const code = inviteCode || serverName.substring(0, 4).toUpperCase() + '-' + Math.random().toString(36).substring(2, 6).toUpperCase();
     
-    // Create server
     const result = await serversCollection.insertOne({
       name: serverName,
       inviteCode: code,
@@ -199,7 +186,6 @@ app.post('/api/servers/create', async (req, res) => {
       ]
     });
     
-    // Add server to user's servers
     await usersCollection.updateOne(
       { _id: userObjectId },
       { $addToSet: { servers: result.insertedId } }
@@ -211,23 +197,7 @@ app.post('/api/servers/create', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
-// Verify agent access code
-app.post('/verify-agent', (req, res) => {
-  const { accessCode } = req.body;
-  
-  // Check if access code matches any agent
-  const agent = Object.entries(AGENTS).find(([name, data]) => data.accessCode === accessCode);
-  
-  if (agent) {
-    res.json({ 
-      valid: true, 
-      agent: agent[0],
-      title: agent[1].title 
-    });
-  } else {
-    res.json({ valid: false });
-  }
-});
+
 // === WebSocket for Real-Time ===
 wss.on('connection', (ws) => {
   console.log('📡 New WebSocket connection');
@@ -236,9 +206,6 @@ wss.on('connection', (ws) => {
     try {
       const msg = JSON.parse(data);
       console.log('Received:', msg.type);
-      
-      // Handle different message types here (Phase 2)
-      
     } catch (e) {
       console.error('WebSocket error:', e.message);
     }
