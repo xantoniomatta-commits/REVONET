@@ -18,7 +18,7 @@ const DB_NAME = 'revonet';
 const USERS_COLLECTION = 'users';
 const SERVERS_COLLECTION = 'servers';
 
-let db, usersCollection, serversCollection;
+let db, usersCollection, serversCollection, conversationsCollection, dmMessagesCollection;
 
 async function connectToDatabase() {
   try {
