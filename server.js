@@ -4,29 +4,10 @@ const http = require('http');
 const WebSocket = require('ws');
 const { MongoClient, ObjectId } = require('mongodb');
 const bcrypt = require('bcrypt');
-const multer = require('multer');
-const cloudinary = require('cloudinary').v2;
-const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-// Cloudinary Setup (for images/videos/files)
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || 'your-cloud-name',
-  api_key: process.env.CLOUDINARY_API_KEY || 'your-api-key',
-  api_secret: process.env.CLOUDINARY_API_SECRET || 'your-secret'
-});
-
-const storage = new CloudinaryStorage({
-  cloudinary: cloudinary,
-  params: {
-    folder: 'revonet',
-    resource_type: 'auto'
-  }
-});
-const upload = multer({ storage });
 
 const PORT = process.env.PORT || 8080;
 const server = http.createServer(app);
@@ -36,7 +17,14 @@ const wss = new WebSocket.Server({ server });
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://Zenith:ZenZone1@revonet.j86zjlv.mongodb.net/?retryWrites=true&w=majority&appName=REVONET';
 const DB_NAME = 'revonet';
 
-let db, usersCollection, serversCollection, messagesCollection, conversationsCollection, friendsCollection, notificationsCollection;
+let db;
+let usersCollection;
+let serversCollection;
+let serverMessagesCollection;
+let conversationsCollection;
+let dmMessagesCollection;
+let friendsCollection;
+let notificationsCollection;
 
 async function connectToDatabase() {
   try {
@@ -45,8 +33,9 @@ async function connectToDatabase() {
     db = client.db(DB_NAME);
     usersCollection = db.collection('users');
     serversCollection = db.collection('servers');
-    messagesCollection = db.collection('messages');
+    serverMessagesCollection = db.collection('server_messages');
     conversationsCollection = db.collection('conversations');
+    dmMessagesCollection = db.collection('dm_messages');
     friendsCollection = db.collection('friends');
     notificationsCollection = db.collection('notifications');
     console.log(`✅ Connected to MongoDB: ${DB_NAME}`);
@@ -56,36 +45,50 @@ async function connectToDatabase() {
   }
 }
 
-// WebSocket Connections
+// WebSocket State
 const clients = new Map();
-const typingUsers = new Map();
+const userSockets = new Map();
 
 wss.on('connection', (ws) => {
   let userId = null;
-  let currentChannel = null;
+  let currentChannelId = null;
   
   ws.on('message', async (data) => {
     try {
       const msg = JSON.parse(data);
       
+      // === AUTHENTICATION ===
       if (msg.type === 'auth') {
         userId = msg.userId;
-        clients.set(userId, ws);
+        userSockets.set(userId, ws);
+        clients.set(ws, { userId });
+        console.log(`📡 User ${userId} connected`);
+        
+        // Send online status to friends
         broadcastUserStatus(userId, 'online');
       }
       
-      else if (msg.type === 'typing') {
-        typingUsers.set(userId, { channel: msg.channel, timestamp: Date.now() });
-        broadcastTyping(msg.channel, userId);
+      // === JOIN CHANNEL ===
+      else if (msg.type === 'join_channel' && userId) {
+        currentChannelId = msg.channelId;
+        console.log(`📺 User ${userId} joined channel ${currentChannelId}`);
+        
+        // Send recent messages
+        if (serverMessagesCollection) {
+          const messages = await serverMessagesCollection.find({ 
+            channelId: new ObjectId(currentChannelId) 
+          }).sort({ timestamp: -1 }).limit(50).toArray();
+          ws.send(JSON.stringify({ type: 'history', messages: messages.reverse() }));
+        }
       }
       
-      else if (msg.type === 'chat') {
+      // === SEND MESSAGE (Normal Server) ===
+      else if (msg.type === 'chat' && userId && currentChannelId) {
         const message = {
-          channelId: msg.channelId,
-          senderId: userId,
+          channelId: new ObjectId(currentChannelId),
+          senderId: new ObjectId(userId),
           senderName: msg.senderName,
           content: msg.content,
-          type: msg.messageType || 'text',
           attachments: msg.attachments || [],
           replyTo: msg.replyTo || null,
           mentions: extractMentions(msg.content),
@@ -94,10 +97,11 @@ wss.on('connection', (ws) => {
           timestamp: new Date()
         };
         
-        const result = await messagesCollection.insertOne(message);
+        const result = await serverMessagesCollection.insertOne(message);
         message._id = result.insertedId;
         
-        broadcastToChannel(msg.channelId, { type: 'message', message });
+        // Broadcast to all users in this channel
+        broadcastToChannel(currentChannelId, { type: 'message', message });
         
         // Send notifications for mentions
         message.mentions.forEach(async (username) => {
@@ -107,85 +111,77 @@ wss.on('connection', (ws) => {
               userId: user._id,
               type: 'mention',
               read: false,
-              data: { messageId: message._id, channelId: msg.channelId, from: msg.senderName },
+              data: { messageId: message._id, channelId: currentChannelId, from: msg.senderName },
               createdAt: new Date()
             });
-            notifyUser(user._id.toString(), { type: 'mention', message });
+            notifyUser(user._id.toString(), { type: 'notification', content: `${msg.senderName} mentioned you` });
           }
         });
       }
       
-      else if (msg.type === 'edit_message') {
-        await messagesCollection.updateOne(
-          { _id: new ObjectId(msg.messageId), senderId: userId },
+      // === EDIT MESSAGE ===
+      else if (msg.type === 'edit_message' && userId) {
+        await serverMessagesCollection.updateOne(
+          { _id: new ObjectId(msg.messageId), senderId: new ObjectId(userId) },
           { $set: { content: msg.content, edited: true, editedAt: new Date() } }
         );
         broadcastToChannel(msg.channelId, { type: 'message_edited', messageId: msg.messageId, content: msg.content });
       }
       
-      else if (msg.type === 'delete_message') {
-        await messagesCollection.updateOne(
-          { _id: new ObjectId(msg.messageId), senderId: userId },
+      // === DELETE MESSAGE ===
+      else if (msg.type === 'delete_message' && userId) {
+        await serverMessagesCollection.updateOne(
+          { _id: new ObjectId(msg.messageId), senderId: new ObjectId(userId) },
           { $set: { deleted: true, deletedAt: new Date() } }
         );
         broadcastToChannel(msg.channelId, { type: 'message_deleted', messageId: msg.messageId });
       }
       
-      else if (msg.type === 'reaction') {
-        await messagesCollection.updateOne(
-          { _id: new ObjectId(msg.messageId) },
-          { $addToSet: { [`reactions.${msg.emoji}`]: userId } }
-        );
-        broadcastToChannel(msg.channelId, { type: 'reaction', messageId: msg.messageId, emoji: msg.emoji, userId });
+      // === TYPING INDICATOR ===
+      else if (msg.type === 'typing' && userId) {
+        broadcastToChannel(msg.channelId, { type: 'typing', userId, username: msg.username }, ws);
       }
       
     } catch (e) {
-      console.error('WebSocket error:', e);
+      console.error('WebSocket error:', e.message);
     }
   });
   
   ws.on('close', () => {
     if (userId) {
-      clients.delete(userId);
+      console.log(`❌ User ${userId} disconnected`);
+      userSockets.delete(userId);
+      clients.delete(ws);
       broadcastUserStatus(userId, 'offline');
     }
   });
 });
 
-function extractMentions(content) {
-  const matches = content.match(/@(\w+)/g) || [];
-  return matches.map(m => m.substring(1));
-}
-
-function broadcastToChannel(channelId, message) {
-  clients.forEach((ws, uid) => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ ...message, channelId }));
+function broadcastToChannel(channelId, message, excludeWs = null) {
+  clients.forEach((data, ws) => {
+    if (ws !== excludeWs && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(message));
     }
   });
 }
 
 function broadcastUserStatus(userId, status) {
-  clients.forEach((ws) => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'user_status', userId, status }));
-    }
-  });
-}
-
-function broadcastTyping(channelId, userId) {
-  clients.forEach((ws) => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'typing', channelId, userId }));
-    }
+  const message = JSON.stringify({ type: 'user_status', userId, status });
+  clients.forEach((_, ws) => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(message);
   });
 }
 
 function notifyUser(userId, notification) {
-  const ws = clients.get(userId);
+  const ws = userSockets.get(userId);
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(notification));
   }
+}
+
+function extractMentions(content) {
+  const matches = content.match(/@(\w+)/g) || [];
+  return matches.map(m => m.substring(1));
 }
 
 // === API ROUTES ===
@@ -202,7 +198,7 @@ app.post('/api/register', async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
     const result = await usersCollection.insertOne({
       email, password: hashedPassword, username,
-      avatar: null, status: 'online', bio: '',
+      avatar: null, status: 'offline', bio: '',
       friends: [], servers: [],
       createdAt: new Date()
     });
@@ -269,7 +265,10 @@ app.post('/api/servers/create', async (req, res) => {
     const result = await serversCollection.insertOne({
       name, inviteCode: code, ownerId: new ObjectId(userId),
       members: [new ObjectId(userId)],
-      channels: [{ name: 'general', type: 'text' }],
+      channels: [
+        { name: 'welcome', type: 'text' },
+        { name: 'general', type: 'text' }
+      ],
       createdAt: new Date()
     });
     
@@ -280,14 +279,14 @@ app.post('/api/servers/create', async (req, res) => {
   }
 });
 
-// Messages
-app.get('/api/messages', async (req, res) => {
+// Channel Messages
+app.get('/api/channels/:channelId/messages', async (req, res) => {
   try {
-    const { channelId, limit = 50, before } = req.query;
-    const query = { channelId, deleted: { $ne: true } };
-    if (before) query.timestamp = { $lt: new Date(before) };
-    
-    const messages = await messagesCollection.find(query).sort({ timestamp: -1 }).limit(parseInt(limit)).toArray();
+    const { channelId } = req.params;
+    const messages = await serverMessagesCollection.find({ 
+      channelId: new ObjectId(channelId),
+      deleted: { $ne: true }
+    }).sort({ timestamp: -1 }).limit(100).toArray();
     res.json({ messages: messages.reverse() });
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
@@ -312,22 +311,53 @@ app.get('/api/friends', async (req, res) => {
   }
 });
 
+app.get('/api/friends/pending', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    const requests = await friendsCollection.find({
+      friendId: new ObjectId(userId),
+      status: 'pending'
+    }).toArray();
+    
+    const enriched = await Promise.all(requests.map(async (req) => {
+      const fromUser = await usersCollection.findOne({ _id: req.userId });
+      return { id: req._id, fromUsername: fromUser.username };
+    }));
+    
+    res.json({ requests: enriched });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.post('/api/friends/request', async (req, res) => {
   try {
     const { userId, targetUsername } = req.body;
     const target = await usersCollection.findOne({ username: targetUsername });
     if (!target) return res.status(404).json({ error: 'User not found' });
+    if (target._id.toString() === userId) return res.status(400).json({ error: 'Cannot friend yourself' });
+    
+    const existing = await friendsCollection.findOne({
+      $or: [
+        { userId: new ObjectId(userId), friendId: target._id },
+        { userId: target._id, friendId: new ObjectId(userId) }
+      ]
+    });
+    if (existing) return res.status(400).json({ error: 'Friend request already exists' });
     
     await friendsCollection.insertOne({
       userId: new ObjectId(userId), friendId: target._id,
       status: 'pending', createdAt: new Date()
     });
     
+    const fromUser = await usersCollection.findOne({ _id: new ObjectId(userId) });
     await notificationsCollection.insertOne({
       userId: target._id, type: 'friend_request', read: false,
-      data: { fromId: userId, fromUsername: (await usersCollection.findOne({ _id: new ObjectId(userId) })).username },
+      data: { fromId: userId, fromUsername: fromUser.username },
       createdAt: new Date()
     });
+    
+    notifyUser(target._id.toString(), { type: 'notification', content: `${fromUser.username} sent you a friend request` });
     
     res.json({ success: true });
   } catch (error) {
@@ -335,43 +365,127 @@ app.post('/api/friends/request', async (req, res) => {
   }
 });
 
-// File Upload
-app.post('/api/upload', upload.single('file'), (req, res) => {
+app.post('/api/friends/accept', async (req, res) => {
   try {
-    res.json({ url: req.file.path, type: req.file.mimetype });
+    const { userId, requestId } = req.body;
+    await friendsCollection.updateOne(
+      { _id: new ObjectId(requestId), friendId: new ObjectId(userId) },
+      { $set: { status: 'accepted' } }
+    );
+    res.json({ success: true });
   } catch (error) {
-    res.status(500).json({ error: 'Upload failed' });
+    res.status(500).json({ error: 'Server error' });
   }
 });
-// Get DM conversations
+
+app.post('/api/friends/decline', async (req, res) => {
+  try {
+    const { userId, requestId } = req.body;
+    await friendsCollection.deleteOne({ _id: new ObjectId(requestId), friendId: new ObjectId(userId) });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// DMs
 app.get('/api/dm/conversations', async (req, res) => {
-  const { userId } = req.query;
-  const conversations = await conversationsCollection.find({
-    participants: new ObjectId(userId)
-  }).toArray();
-  res.json({ conversations: conversations || [] });
+  try {
+    const { userId } = req.query;
+    const conversations = await conversationsCollection.find({
+      participants: new ObjectId(userId)
+    }).toArray();
+    
+    const enriched = await Promise.all(conversations.map(async (conv) => {
+      const otherId = conv.participants.find(id => id.toString() !== userId);
+      const otherUser = await usersCollection.findOne({ _id: otherId });
+      const lastMsg = await dmMessagesCollection.findOne(
+        { conversationId: conv._id },
+        { sort: { timestamp: -1 } }
+      );
+      return {
+        id: conv._id,
+        otherUser: { id: otherUser._id, username: otherUser.username },
+        lastMessage: lastMsg
+      };
+    }));
+    
+    res.json({ conversations: enriched });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
-// Get pending friend requests
-app.get('/api/friends/pending', async (req, res) => {
-  const { userId } = req.query;
-  const requests = await friendsCollection.find({
-    friendId: new ObjectId(userId),
-    status: 'pending'
-  }).toArray();
-  res.json({ requests: requests || [] });
+app.post('/api/dm/create', async (req, res) => {
+  try {
+    const { userId, targetUserId } = req.body;
+    
+    let conv = await conversationsCollection.findOne({
+      participants: { $all: [new ObjectId(userId), new ObjectId(targetUserId)] }
+    });
+    
+    if (!conv) {
+      const result = await conversationsCollection.insertOne({
+        participants: [new ObjectId(userId), new ObjectId(targetUserId)],
+        createdAt: new Date()
+      });
+      conv = { _id: result.insertedId };
+    }
+    
+    res.json({ conversationId: conv._id });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
-// File upload
-app.post('/api/upload', upload.single('file'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file' });
-  res.json({ url: req.file.path, type: req.file.mimetype });
+app.get('/api/dm/messages', async (req, res) => {
+  try {
+    const { conversationId } = req.query;
+    const messages = await dmMessagesCollection.find({
+      conversationId: new ObjectId(conversationId)
+    }).sort({ timestamp: 1 }).limit(100).toArray();
+    res.json({ messages });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
 });
+
+app.post('/api/dm/send', async (req, res) => {
+  try {
+    const { conversationId, senderId, senderName, content } = req.body;
+    
+    const message = {
+      conversationId: new ObjectId(conversationId),
+      senderId: new ObjectId(senderId),
+      senderName,
+      content,
+      timestamp: new Date(),
+      readBy: [new ObjectId(senderId)]
+    };
+    
+    await dmMessagesCollection.insertOne(message);
+    
+    // Notify recipient via WebSocket
+    const conv = await conversationsCollection.findOne({ _id: new ObjectId(conversationId) });
+    const recipientId = conv.participants.find(id => id.toString() !== senderId);
+    notifyUser(recipientId.toString(), { type: 'dm', message });
+    
+    res.json({ success: true, message });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// File Upload (placeholder - implement with Cloudinary)
+app.post('/api/upload', (req, res) => {
+  res.json({ url: 'https://via.placeholder.com/150', type: 'image/png' });
+});
+
 // Start Server
 async function start() {
   await connectToDatabase();
   server.listen(PORT, () => {
-    console.log(`🔒 REVONET v2 SERVER READY`);
+    console.log(`🔒 REVONET SERVER READY`);
     console.log(`📍 Port ${PORT}`);
   });
 }
