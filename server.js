@@ -211,7 +211,23 @@ app.post('/api/servers/create', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
-
+// Verify agent access code
+app.post('/verify-agent', (req, res) => {
+  const { accessCode } = req.body;
+  
+  // Check if access code matches any agent
+  const agent = Object.entries(AGENTS).find(([name, data]) => data.accessCode === accessCode);
+  
+  if (agent) {
+    res.json({ 
+      valid: true, 
+      agent: agent[0],
+      title: agent[1].title 
+    });
+  } else {
+    res.json({ valid: false });
+  }
+});
 // === WebSocket for Real-Time ===
 wss.on('connection', (ws) => {
   console.log('📡 New WebSocket connection');
