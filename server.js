@@ -76,7 +76,7 @@ wss.on('connection', (ws) => {
         // Send recent messages
         if (serverMessagesCollection) {
           const messages = await serverMessagesCollection.find({ 
-            channelId: new ObjectId(currentChannelId) 
+            channelId: channelId
           }).sort({ timestamp: -1 }).limit(50).toArray();
           ws.send(JSON.stringify({ type: 'history', messages: messages.reverse() }));
         }
@@ -230,13 +230,16 @@ app.post('/api/login', async (req, res) => {
 });
 
 // Servers
-app.get('/api/servers', async (req, res) => {
+app.get('/api/channels/:channelId/messages', async (req, res) => {
   try {
-    const { userId } = req.query;
-    const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
-    const servers = await serversCollection.find({ _id: { $in: user.servers || [] } }).toArray();
-    res.json({ servers });
+    const { channelId } = req.params;
+    const messages = await serverMessagesCollection.find({ 
+      channelId: channelId,  // ← Just use the string directly
+      deleted: { $ne: true }
+    }).sort({ timestamp: -1 }).limit(100).toArray();
+    res.json({ messages: messages.reverse() });
   } catch (error) {
+    console.error('Error loading messages:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
