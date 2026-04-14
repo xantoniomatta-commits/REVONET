@@ -343,7 +343,30 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
     res.status(500).json({ error: 'Upload failed' });
   }
 });
+// Get DM conversations
+app.get('/api/dm/conversations', async (req, res) => {
+  const { userId } = req.query;
+  const conversations = await conversationsCollection.find({
+    participants: new ObjectId(userId)
+  }).toArray();
+  res.json({ conversations: conversations || [] });
+});
 
+// Get pending friend requests
+app.get('/api/friends/pending', async (req, res) => {
+  const { userId } = req.query;
+  const requests = await friendsCollection.find({
+    friendId: new ObjectId(userId),
+    status: 'pending'
+  }).toArray();
+  res.json({ requests: requests || [] });
+});
+
+// File upload
+app.post('/api/upload', upload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file' });
+  res.json({ url: req.file.path, type: req.file.mimetype });
+});
 // Start Server
 async function start() {
   await connectToDatabase();
