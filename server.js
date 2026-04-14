@@ -116,7 +116,7 @@ app.get('/api/user/servers', async (req, res) => {
     const { userId } = req.query;
     if (!userId) return res.status(400).json({ error: 'User ID required' });
     
-    const user = await usersCollection.findOne({ _id: new MongoClient.ObjectId(userId) });
+    const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
     if (!user) return res.status(404).json({ error: 'User not found' });
     
     // Get full server details for each server ID
@@ -145,7 +145,7 @@ app.post('/api/servers/join', async (req, res) => {
       return res.status(404).json({ error: 'Invalid invite code' });
     }
     
-    const userObjectId = new MongoClient.ObjectId(userId);
+    const userObjectId = new ObjectId(userId);
     
     // Check if user already in server
     const user = await usersCollection.findOne({ _id: userObjectId });
@@ -181,7 +181,7 @@ app.post('/api/servers/create', async (req, res) => {
       return res.status(400).json({ error: 'User ID and server name required' });
     }
     
-    const userObjectId = new MongoClient.ObjectId(userId);
+    const userObjectId = new ObjectId(userId);
     
     // Generate invite code if not provided
     const code = inviteCode || serverName.substring(0, 4).toUpperCase() + '-' + Math.random().toString(36).substring(2, 6).toUpperCase();
