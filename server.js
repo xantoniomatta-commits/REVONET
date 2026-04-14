@@ -12,6 +12,7 @@ const wss = new WebSocket.Server({ server });
 const PORT = process.env.PORT || 8080;
 
 // === MongoDB Setup ===
+
 const MONGODB_URI = 'mongodb+srv://Zenith:ZenZone1@revonet.j86zjlv.mongodb.net/?retryWrites=true&w=majority&appName=REVONET';
 const DB_NAME = 'revonet';
 const USERS_COLLECTION = 'users';
