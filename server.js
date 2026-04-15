@@ -270,7 +270,120 @@ app.get('/api/channels/:channelId/messages', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+// ===== ADD THIS AFTER your /api/channels/:channelId/messages endpoint =====
 
+// Get server members (roster)
+app.get('/api/servers/:serverId/members', async (req, res) => {
+  try {
+    const { serverId } = req.params;
+    const { userId } = req.query;
+    
+    // Find the server
+    const server = await serversCollection.findOne({ 
+      _id: new ObjectId(serverId)
+    });
+    
+    if (!server) {
+      return res.status(404).json({ error: 'Server not found' });
+    }
+    
+    // Check if user is a member (optional - you can skip this check)
+    const isMember = server.members?.some(m => m.toString() === userId || m === userId);
+    if (!isMember && userId) {
+      // Still return members but maybe limited info
+      console.log(`User ${userId} requested members of server ${serverId}`);
+    }
+    
+    // Get all member details
+    const memberIds = (server.members || []).map(m => {
+      // Handle both ObjectId objects and string IDs
+      return typeof m === 'object' ? m : new ObjectId(m);
+    });
+    
+    let members = [];
+    if (memberIds.length > 0) {
+      members = await usersCollection.find({ 
+        _id: { $in: memberIds } 
+      }).project({ 
+        _id: 1, 
+        username: 1, 
+        email: 1, 
+        avatar: 1, 
+        status: 1,
+        bio: 1 
+      }).toArray();
+    }
+    
+    // Format members with online status (you can track this via WebSocket later)
+    const formattedMembers = members.map(member => ({
+      _id: member._id,
+      username: member.username,
+      email: member.email,
+      avatar: member.avatar || null,
+      status: member.status || 'offline',
+      bio: member.bio || ''
+    }));
+    
+    res.json({ members: formattedMembers });
+    
+  } catch (error) {
+    console.error('Error fetching server members:', error);
+    res.status(500).json({ error: 'Failed to fetch members' });
+  }
+});
+
+// Get single user profile
+app.get('/api/users/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    const user = await usersCollection.findOne(
+      { _id: new ObjectId(userId) },
+      { projection: { password: 0 } } // Don't send password
+    );
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    res.json({ 
+      user: {
+        _id: user._id,
+        username: user.username,
+        email: user.email,
+        avatar: user.avatar,
+        status: user.status || 'offline',
+        bio: user.bio || '',
+        createdAt: user.createdAt
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error fetching user:', error);
+    res.status(500).json({ error: 'Failed to fetch user' });
+  }
+});
+
+// Get server channels (if you need it)
+app.get('/api/servers/:serverId/channels', async (req, res) => {
+  try {
+    const { serverId } = req.params;
+    
+    const server = await serversCollection.findOne({ 
+      _id: new ObjectId(serverId)
+    });
+    
+    if (!server) {
+      return res.status(404).json({ error: 'Server not found' });
+    }
+    
+    res.json({ channels: server.channels || [] });
+    
+  } catch (error) {
+    console.error('Error fetching channels:', error);
+    res.status(500).json({ error: 'Failed to fetch channels' });
+  }
+});
 // Friends
 app.get('/api/friends', async (req, res) => {
   try {
