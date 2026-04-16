@@ -4,36 +4,20 @@ const http = require('http');
 const WebSocket = require('ws');
 const { MongoClient, ObjectId } = require('mongodb');
 const bcrypt = require('bcrypt');
+const path = require('path');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const express = require('express');
-const cors = require('cors');
-const http = require('http');
-const WebSocket = require('ws');
-const { MongoClient, ObjectId } = require('mongodb');
-const bcrypt = require('bcrypt');
-const path = require('path'); // ← ADD THIS
-
-const app = express();
-app.use(cors());
-app.use(express.json());
-
-// === ADD THESE LINES - Serve static files ===
+// Serve static files
 app.use(express.static(__dirname));
 app.use('/js', express.static(path.join(__dirname, 'js')));
 app.use('/css', express.static(path.join(__dirname, 'css')));
 
-// Optional: Serve index.html for the root route
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
-// === END OF ADDITIONS ===
-
-const PORT = process.env.PORT || 8080;
-// ... rest of your server.js stays the same
 
 const PORT = process.env.PORT || 8080;
 const server = http.createServer(app);
@@ -296,6 +280,7 @@ app.get('/api/channels/:channelId/messages', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+
 app.put('/api/messages/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -315,6 +300,7 @@ app.put('/api/messages/:id', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+
 app.get('/api/servers/:serverId/members', async (req, res) => {
   try {
     const { serverId } = req.params;
