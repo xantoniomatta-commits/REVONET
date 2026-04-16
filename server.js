@@ -584,7 +584,16 @@ app.post('/api/dm/send', async (req, res) => {
 app.post('/api/upload', (req, res) => {
   res.json({ url: 'https://via.placeholder.com/150', type: 'image/png' });
 });
-
+// When someone deletes a message, broadcast to all users in that channel:
+wsServer.clients.forEach(client => {
+  if (client.readyState === WebSocket.OPEN && client.channelId === message.channelId) {
+    client.send(JSON.stringify({
+      type: 'message_deleted',
+      messageId: messageId,
+      channelId: message.channelId
+    }));
+  }
+});
 async function start() {
   await connectToDatabase();
   server.listen(PORT, () => {
