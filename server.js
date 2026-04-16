@@ -74,7 +74,7 @@ wss.on('connection', (ws) => {
         const pins = await pinsCollection.find({ channelId: currentChannelId }).sort({ timestamp: -1 }).limit(50).toArray();
         ws.send(JSON.stringify({ type: 'pins_list', channelId: currentChannelId, pins: pins }));
         
-        // Send existing reactions for this channel
+        // Send existing reactions for messages in this channel
         const reactions = await reactionsCollection.find({ channelId: currentChannelId }).toArray();
         ws.send(JSON.stringify({ type: 'reactions_list', channelId: currentChannelId, reactions: reactions }));
       }
@@ -144,6 +144,7 @@ wss.on('connection', (ws) => {
           content: content,
           author: author,
           pinnedBy: userId,
+          pinnedById: userId,
           pinnedByUsername: user?.username || 'User',
           timestamp: new Date()
         };
@@ -157,11 +158,7 @@ wss.on('connection', (ws) => {
         broadcastToChannel(channelId, {
           type: 'pin_added',
           channelId: channelId,
-          messageId: messageId,
-          content: content,
-          author: author,
-          pinnedBy: userId,
-          pinnedByUsername: user?.username || 'User'
+          messageId: messageId
         });
         
         console.log(`📌 Message pinned in ${channelId}`);
@@ -190,25 +187,23 @@ wss.on('connection', (ws) => {
       // ===== REACTIONS =====
       else if (msg.type === 'reaction' && userId) {
         const { channelId, messageId, emoji } = msg;
-        const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
-        const username = user?.username || 'User';
         
         const key = `${channelId}_${messageId}_${emoji}`;
         
         const existing = await reactionsCollection.findOne({ key: key });
         
         if (existing) {
-          if (existing.users.includes(userId)) {
+          if (existing.users && existing.users.includes(userId)) {
             // Remove reaction
             await reactionsCollection.updateOne(
               { key: key },
-              { $pull: { users: userId, usernames: username } }
+              { $pull: { users: userId } }
             );
           } else {
             // Add reaction
             await reactionsCollection.updateOne(
               { key: key },
-              { $addToSet: { users: userId, usernames: username } }
+              { $addToSet: { users: userId } }
             );
           }
         } else {
@@ -218,7 +213,6 @@ wss.on('connection', (ws) => {
             messageId: messageId,
             emoji: emoji,
             users: [userId],
-            usernames: [username],
             timestamp: new Date()
           });
         }
@@ -229,7 +223,7 @@ wss.on('connection', (ws) => {
           await reactionsCollection.deleteOne({ key: key });
         }
         
-        // Get updated counts
+        // Get updated reactions for this message
         const allReactions = await reactionsCollection.find({ messageId: messageId }).toArray();
         
         broadcastToChannel(channelId, {
