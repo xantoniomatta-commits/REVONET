@@ -9,6 +9,32 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+const express = require('express');
+const cors = require('cors');
+const http = require('http');
+const WebSocket = require('ws');
+const { MongoClient, ObjectId } = require('mongodb');
+const bcrypt = require('bcrypt');
+const path = require('path'); // ← ADD THIS
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// === ADD THESE LINES - Serve static files ===
+app.use(express.static(__dirname));
+app.use('/js', express.static(path.join(__dirname, 'js')));
+app.use('/css', express.static(path.join(__dirname, 'css')));
+
+// Optional: Serve index.html for the root route
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'index.html'));
+});
+// === END OF ADDITIONS ===
+
+const PORT = process.env.PORT || 8080;
+// ... rest of your server.js stays the same
+
 const PORT = process.env.PORT || 8080;
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
