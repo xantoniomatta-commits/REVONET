@@ -16,7 +16,7 @@ const wss = new WebSocket.Server({ server });
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://Zenith:ZenZone1@revonet.j86zjlv.mongodb.net/?retryWrites=true&w=majority&appName=REVONET';
 const DB_NAME = 'revonet';
 
-let db, usersCollection, serversCollection, serverMessagesCollection, conversationsCollection, dmMessagesCollection, friendsCollection, notificationsCollection;
+let db, usersCollection, serversCollection, serverMessagesCollection, conversationsCollection, dmMessagesCollection, friendsCollection, notificationsCollection, pinsCollection, reactionsCollection;
 
 async function connectToDatabase() {
   try {
@@ -30,6 +30,8 @@ async function connectToDatabase() {
     dmMessagesCollection = db.collection('dm_messages');
     friendsCollection = db.collection('friends');
     notificationsCollection = db.collection('notifications');
+    pinsCollection = db.collection('pins');
+    reactionsCollection = db.collection('reactions');
     console.log(`✅ Connected to MongoDB: ${DB_NAME}`);
   } catch (error) {
     console.error('❌ MongoDB connection failed:', error);
@@ -67,6 +69,14 @@ wss.on('connection', (ws) => {
           }).sort({ timestamp: -1 }).limit(50).toArray();
           ws.send(JSON.stringify({ type: 'history', messages: messages.reverse() }));
         }
+        
+        // Send existing pins for this channel
+        const pins = await pinsCollection.find({ channelId: currentChannelId }).sort({ timestamp: -1 }).limit(50).toArray();
+        ws.send(JSON.stringify({ type: 'pins_list', channelId: currentChannelId, pins: pins }));
+        
+        // Send existing reactions for this channel
+        const reactions = await reactionsCollection.find({ channelId: currentChannelId }).toArray();
+        ws.send(JSON.stringify({ type: 'reactions_list', channelId: currentChannelId, reactions: reactions }));
       }
       
       else if (msg.type === 'chat' && userId && currentChannelId) {
@@ -110,6 +120,7 @@ wss.on('connection', (ws) => {
         );
         broadcastToChannel(msg.channelId, { type: 'message_edited', messageId: msg.messageId, content: msg.content, channelId: msg.channelId });
       }
+      
       else if (msg.type === 'delete_message' && userId) {
         await serverMessagesCollection.updateOne(
           { _id: new ObjectId(msg.messageId), senderId: new ObjectId(userId) },
@@ -120,6 +131,115 @@ wss.on('connection', (ws) => {
       
       else if (msg.type === 'typing' && userId) {
         broadcastToChannel(msg.channelId, { type: 'typing', userId, username: msg.username }, ws);
+      }
+      
+      // ===== PINS =====
+      else if (msg.type === 'pin_message' && userId) {
+        const { channelId, messageId, content, author } = msg;
+        const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
+        
+        const pinData = {
+          channelId: channelId,
+          messageId: messageId,
+          content: content,
+          author: author,
+          pinnedBy: userId,
+          pinnedByUsername: user?.username || 'User',
+          timestamp: new Date()
+        };
+        
+        await pinsCollection.updateOne(
+          { channelId: channelId, messageId: messageId },
+          { $set: pinData },
+          { upsert: true }
+        );
+        
+        broadcastToChannel(channelId, {
+          type: 'pin_added',
+          channelId: channelId,
+          messageId: messageId,
+          content: content,
+          author: author,
+          pinnedBy: userId,
+          pinnedByUsername: user?.username || 'User'
+        });
+        
+        console.log(`📌 Message pinned in ${channelId}`);
+      }
+      
+      else if (msg.type === 'unpin_message' && userId) {
+        const { channelId, messageId } = msg;
+        
+        await pinsCollection.deleteOne({ channelId: channelId, messageId: messageId });
+        
+        broadcastToChannel(channelId, {
+          type: 'pin_removed',
+          channelId: channelId,
+          messageId: messageId
+        });
+        
+        console.log(`📌 Message unpinned in ${channelId}`);
+      }
+      
+      else if (msg.type === 'get_pins') {
+        const { channelId } = msg;
+        const pins = await pinsCollection.find({ channelId: channelId }).sort({ timestamp: -1 }).limit(50).toArray();
+        ws.send(JSON.stringify({ type: 'pins_list', channelId: channelId, pins: pins }));
+      }
+      
+      // ===== REACTIONS =====
+      else if (msg.type === 'reaction' && userId) {
+        const { channelId, messageId, emoji } = msg;
+        const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
+        const username = user?.username || 'User';
+        
+        const key = `${channelId}_${messageId}_${emoji}`;
+        
+        const existing = await reactionsCollection.findOne({ key: key });
+        
+        if (existing) {
+          if (existing.users.includes(userId)) {
+            // Remove reaction
+            await reactionsCollection.updateOne(
+              { key: key },
+              { $pull: { users: userId, usernames: username } }
+            );
+          } else {
+            // Add reaction
+            await reactionsCollection.updateOne(
+              { key: key },
+              { $addToSet: { users: userId, usernames: username } }
+            );
+          }
+        } else {
+          await reactionsCollection.insertOne({
+            key: key,
+            channelId: channelId,
+            messageId: messageId,
+            emoji: emoji,
+            users: [userId],
+            usernames: [username],
+            timestamp: new Date()
+          });
+        }
+        
+        // Clean up if empty
+        const updated = await reactionsCollection.findOne({ key: key });
+        if (updated && (!updated.users || updated.users.length === 0)) {
+          await reactionsCollection.deleteOne({ key: key });
+        }
+        
+        // Get updated counts
+        const allReactions = await reactionsCollection.find({ messageId: messageId }).toArray();
+        
+        broadcastToChannel(channelId, {
+          type: 'reaction_update',
+          channelId: channelId,
+          messageId: messageId,
+          reactions: allReactions
+        });
+        
+        console.log(`😊 Reaction updated on ${messageId}`);
       }
       
     } catch (e) {
