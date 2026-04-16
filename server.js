@@ -270,7 +270,25 @@ app.get('/api/channels/:channelId/messages', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
-
+app.put('/api/messages/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { content, userId } = req.body;
+    
+    const result = await serverMessagesCollection.updateOne(
+      { _id: new ObjectId(id), senderId: new ObjectId(userId) },
+      { $set: { content: content, edited: true, editedAt: new Date() } }
+    );
+    
+    if (result.modifiedCount > 0) {
+      res.json({ success: true, content: content });
+    } else {
+      res.status(404).json({ error: 'Message not found or not yours' });
+    }
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
 app.get('/api/servers/:serverId/members', async (req, res) => {
   try {
     const { serverId } = req.params;
