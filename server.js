@@ -420,7 +420,22 @@ app.get('/api/friends/pending', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+// Backend routes needed (Express.js example):
+app.delete('/api/messages/:id', async (req, res) => {
+  const { id } = req.params;
+  const { userId } = req.body;
+  
+  // Find message, check if user owns it, then delete
+  // Return { success: true }
+});
 
+app.put('/api/messages/:id', async (req, res) => {
+  const { id } = req.params;
+  const { content, userId } = req.body;
+  
+  // Find message, check if user owns it, then update
+  // Return { success: true, content: newContent }
+});
 app.post('/api/friends/request', async (req, res) => {
   try {
     const { userId, targetUsername } = req.body;
