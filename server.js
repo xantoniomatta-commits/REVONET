@@ -4,20 +4,10 @@ const http = require('http');
 const WebSocket = require('ws');
 const { MongoClient, ObjectId } = require('mongodb');
 const bcrypt = require('bcrypt');
-const path = require('path');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-// Serve static files
-app.use(express.static(__dirname));
-app.use('/js', express.static(path.join(__dirname, 'js')));
-app.use('/css', express.static(path.join(__dirname, 'css')));
-
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
-});
 
 const PORT = process.env.PORT || 8080;
 const server = http.createServer(app);
