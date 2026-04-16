@@ -110,7 +110,6 @@ wss.on('connection', (ws) => {
         );
         broadcastToChannel(msg.channelId, { type: 'message_edited', messageId: msg.messageId, content: msg.content, channelId: msg.channelId });
       }
-      
       else if (msg.type === 'delete_message' && userId) {
         await serverMessagesCollection.updateOne(
           { _id: new ObjectId(msg.messageId), senderId: new ObjectId(userId) },
