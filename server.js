@@ -62,7 +62,8 @@ wss.on('connection', (ws) => {
         
         if (serverMessagesCollection) {
           const messages = await serverMessagesCollection.find({ 
-            channelId: currentChannelId
+            channelId: currentChannelId,
+            deleted: { $ne: true }
           }).sort({ timestamp: -1 }).limit(50).toArray();
           ws.send(JSON.stringify({ type: 'history', messages: messages.reverse() }));
         }
@@ -107,7 +108,7 @@ wss.on('connection', (ws) => {
           { _id: new ObjectId(msg.messageId), senderId: new ObjectId(userId) },
           { $set: { content: msg.content, edited: true, editedAt: new Date() } }
         );
-        broadcastToChannel(msg.channelId, { type: 'message_edited', messageId: msg.messageId, content: msg.content });
+        broadcastToChannel(msg.channelId, { type: 'message_edited', messageId: msg.messageId, content: msg.content, channelId: msg.channelId });
       }
       
       else if (msg.type === 'delete_message' && userId) {
@@ -115,7 +116,7 @@ wss.on('connection', (ws) => {
           { _id: new ObjectId(msg.messageId), senderId: new ObjectId(userId) },
           { $set: { deleted: true, deletedAt: new Date() } }
         );
-        broadcastToChannel(msg.channelId, { type: 'message_deleted', messageId: msg.messageId });
+        broadcastToChannel(msg.channelId, { type: 'message_deleted', messageId: msg.messageId, channelId: msg.channelId });
       }
       
       else if (msg.type === 'typing' && userId) {
@@ -212,7 +213,7 @@ app.get('/api/servers', async (req, res) => {
   try {
     const { userId } = req.query;
     const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
-    const servers = await serversCollection.find({ _id: { $in: user.servers || [] } }).toArray();
+    const servers = await serversCollection.find({ _id: { $in: user?.servers || [] } }).toArray();
     res.json({ servers });
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
@@ -237,15 +238,15 @@ app.post('/api/servers/join', async (req, res) => {
 
 app.post('/api/servers/create', async (req, res) => {
   try {
-    const { userId, name, inviteCode } = req.body;
-    const code = inviteCode || name.substring(0, 4).toUpperCase() + '-' + Math.random().toString(36).substring(2, 6).toUpperCase();
+    const { userId, serverName } = req.body;
+    const code = serverName.substring(0, 4).toUpperCase() + '-' + Math.random().toString(36).substring(2, 6).toUpperCase();
     
     const result = await serversCollection.insertOne({
-      name, inviteCode: code, ownerId: new ObjectId(userId),
+      name: serverName, inviteCode: code, ownerId: new ObjectId(userId),
       members: [new ObjectId(userId)],
       channels: [
-        { _id: new ObjectId(), name: 'welcome', type: 'text' },
-        { _id: new ObjectId(), name: 'general', type: 'text' }
+        { name: 'welcome', type: 'text' },
+        { name: 'general', type: 'text' }
       ],
       createdAt: new Date()
     });
@@ -270,121 +271,44 @@ app.get('/api/channels/:channelId/messages', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
-// ===== ADD THIS AFTER your /api/channels/:channelId/messages endpoint =====
 
-// Get server members (roster)
 app.get('/api/servers/:serverId/members', async (req, res) => {
   try {
     const { serverId } = req.params;
-    const { userId } = req.query;
-    
-    // Find the server
-    const server = await serversCollection.findOne({ 
-      _id: new ObjectId(serverId)
-    });
+    const server = await serversCollection.findOne({ _id: new ObjectId(serverId) });
     
     if (!server) {
       return res.status(404).json({ error: 'Server not found' });
     }
     
-    // Check if user is a member (optional - you can skip this check)
-    const isMember = server.members?.some(m => m.toString() === userId || m === userId);
-    if (!isMember && userId) {
-      // Still return members but maybe limited info
-      console.log(`User ${userId} requested members of server ${serverId}`);
-    }
-    
-    // Get all member details
-    const memberIds = (server.members || []).map(m => {
-      // Handle both ObjectId objects and string IDs
-      return typeof m === 'object' ? m : new ObjectId(m);
-    });
-    
+    const memberIds = (server.members || []).map(m => new ObjectId(m));
     let members = [];
     if (memberIds.length > 0) {
-      members = await usersCollection.find({ 
-        _id: { $in: memberIds } 
-      }).project({ 
-        _id: 1, 
-        username: 1, 
-        email: 1, 
-        avatar: 1, 
-        status: 1,
-        bio: 1 
-      }).toArray();
+      members = await usersCollection.find({ _id: { $in: memberIds } }).project({ _id: 1, username: 1, avatar: 1, status: 1 }).toArray();
     }
     
-    // Format members with online status (you can track this via WebSocket later)
-    const formattedMembers = members.map(member => ({
-      _id: member._id,
-      username: member.username,
-      email: member.email,
-      avatar: member.avatar || null,
-      status: member.status || 'offline',
-      bio: member.bio || ''
-    }));
-    
-    res.json({ members: formattedMembers });
-    
+    res.json({ members });
   } catch (error) {
     console.error('Error fetching server members:', error);
     res.status(500).json({ error: 'Failed to fetch members' });
   }
 });
 
-// Get single user profile
 app.get('/api/users/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
-    
-    const user = await usersCollection.findOne(
-      { _id: new ObjectId(userId) },
-      { projection: { password: 0 } } // Don't send password
-    );
+    const user = await usersCollection.findOne({ _id: new ObjectId(userId) }, { projection: { password: 0 } });
     
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
     
-    res.json({ 
-      user: {
-        _id: user._id,
-        username: user.username,
-        email: user.email,
-        avatar: user.avatar,
-        status: user.status || 'offline',
-        bio: user.bio || '',
-        createdAt: user.createdAt
-      }
-    });
-    
+    res.json({ user });
   } catch (error) {
-    console.error('Error fetching user:', error);
     res.status(500).json({ error: 'Failed to fetch user' });
   }
 });
 
-// Get server channels (if you need it)
-app.get('/api/servers/:serverId/channels', async (req, res) => {
-  try {
-    const { serverId } = req.params;
-    
-    const server = await serversCollection.findOne({ 
-      _id: new ObjectId(serverId)
-    });
-    
-    if (!server) {
-      return res.status(404).json({ error: 'Server not found' });
-    }
-    
-    res.json({ channels: server.channels || [] });
-    
-  } catch (error) {
-    console.error('Error fetching channels:', error);
-    res.status(500).json({ error: 'Failed to fetch channels' });
-  }
-});
-// Friends
 app.get('/api/friends', async (req, res) => {
   try {
     const { userId } = req.query;
@@ -412,7 +336,7 @@ app.get('/api/friends/pending', async (req, res) => {
     
     const enriched = await Promise.all(requests.map(async (req) => {
       const fromUser = await usersCollection.findOne({ _id: req.userId });
-      return { id: req._id, fromUsername: fromUser.username };
+      return { _id: req._id, senderUsername: fromUser?.username || 'Unknown' };
     }));
     
     res.json({ requests: enriched });
@@ -420,50 +344,26 @@ app.get('/api/friends/pending', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
-// Backend routes needed (Express.js example):
-app.delete('/api/messages/:id', async (req, res) => {
-  const { id } = req.params;
-  const { userId } = req.body;
-  
-  // Find message, check if user owns it, then delete
-  // Return { success: true }
-});
 
-app.put('/api/messages/:id', async (req, res) => {
-  const { id } = req.params;
-  const { content, userId } = req.body;
-  
-  // Find message, check if user owns it, then update
-  // Return { success: true, content: newContent }
-});
 app.post('/api/friends/request', async (req, res) => {
   try {
-    const { userId, targetUsername } = req.body;
-    const target = await usersCollection.findOne({ username: targetUsername });
+    const { senderId, receiverUsername } = req.body;
+    const target = await usersCollection.findOne({ username: receiverUsername });
     if (!target) return res.status(404).json({ error: 'User not found' });
-    if (target._id.toString() === userId) return res.status(400).json({ error: 'Cannot friend yourself' });
+    if (target._id.toString() === senderId) return res.status(400).json({ error: 'Cannot friend yourself' });
     
     const existing = await friendsCollection.findOne({
       $or: [
-        { userId: new ObjectId(userId), friendId: target._id },
-        { userId: target._id, friendId: new ObjectId(userId) }
+        { userId: new ObjectId(senderId), friendId: target._id },
+        { userId: target._id, friendId: new ObjectId(senderId) }
       ]
     });
     if (existing) return res.status(400).json({ error: 'Friend request already exists' });
     
     await friendsCollection.insertOne({
-      userId: new ObjectId(userId), friendId: target._id,
+      userId: new ObjectId(senderId), friendId: target._id,
       status: 'pending', createdAt: new Date()
     });
-    
-    const fromUser = await usersCollection.findOne({ _id: new ObjectId(userId) });
-    await notificationsCollection.insertOne({
-      userId: target._id, type: 'friend_request', read: false,
-      data: { fromId: userId, fromUsername: fromUser.username },
-      createdAt: new Date()
-    });
-    
-    notifyUser(target._id.toString(), { type: 'notification', content: `${fromUser.username} sent you a friend request` });
     
     res.json({ success: true });
   } catch (error) {
@@ -473,7 +373,7 @@ app.post('/api/friends/request', async (req, res) => {
 
 app.post('/api/friends/accept', async (req, res) => {
   try {
-    const { userId, requestId } = req.body;
+    const { requestId, userId } = req.body;
     await friendsCollection.updateOne(
       { _id: new ObjectId(requestId), friendId: new ObjectId(userId) },
       { $set: { status: 'accepted' } }
@@ -486,7 +386,7 @@ app.post('/api/friends/accept', async (req, res) => {
 
 app.post('/api/friends/decline', async (req, res) => {
   try {
-    const { userId, requestId } = req.body;
+    const { requestId, userId } = req.body;
     await friendsCollection.deleteOne({ _id: new ObjectId(requestId), friendId: new ObjectId(userId) });
     res.json({ success: true });
   } catch (error) {
@@ -494,7 +394,6 @@ app.post('/api/friends/decline', async (req, res) => {
   }
 });
 
-// DMs
 app.get('/api/dm/conversations', async (req, res) => {
   try {
     const { userId } = req.query;
@@ -510,9 +409,9 @@ app.get('/api/dm/conversations', async (req, res) => {
         { sort: { timestamp: -1 } }
       );
       return {
-        id: conv._id,
-        otherUser: { id: otherUser._id, username: otherUser.username },
-        lastMessage: lastMsg
+        _id: conv._id,
+        otherUser: { _id: otherUser?._id, username: otherUser?.username || 'Unknown' },
+        lastMessage: lastMsg?.content || ''
       };
     }));
     
@@ -522,33 +421,11 @@ app.get('/api/dm/conversations', async (req, res) => {
   }
 });
 
-app.post('/api/dm/create', async (req, res) => {
-  try {
-    const { userId, targetUserId } = req.body;
-    
-    let conv = await conversationsCollection.findOne({
-      participants: { $all: [new ObjectId(userId), new ObjectId(targetUserId)] }
-    });
-    
-    if (!conv) {
-      const result = await conversationsCollection.insertOne({
-        participants: [new ObjectId(userId), new ObjectId(targetUserId)],
-        createdAt: new Date()
-      });
-      conv = { _id: result.insertedId };
-    }
-    
-    res.json({ conversationId: conv._id });
-  } catch (error) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
 app.get('/api/dm/messages', async (req, res) => {
   try {
-    const { conversationId } = req.query;
+    const { conversationId, userId } = req.query;
     const messages = await dmMessagesCollection.find({
-      conversationId: new ObjectId(conversationId)
+      conversationId: conversationId
     }).sort({ timestamp: 1 }).limit(100).toArray();
     res.json({ messages });
   } catch (error) {
@@ -556,33 +433,13 @@ app.get('/api/dm/messages', async (req, res) => {
   }
 });
 
-app.post('/api/dm/send', async (req, res) => {
-  try {
-    const { conversationId, senderId, senderName, content } = req.body;
-    
-    const message = {
-      conversationId: new ObjectId(conversationId),
-      senderId: new ObjectId(senderId),
-      senderName,
-      content,
-      timestamp: new Date(),
-      readBy: [new ObjectId(senderId)]
-    };
-    
-    await dmMessagesCollection.insertOne(message);
-    
-    const conv = await conversationsCollection.findOne({ _id: new ObjectId(conversationId) });
-    const recipientId = conv.participants.find(id => id.toString() !== senderId);
-    notifyUser(recipientId.toString(), { type: 'dm', message });
-    
-    res.json({ success: true, message });
-  } catch (error) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-app.post('/api/upload', (req, res) => {
-  res.json({ url: 'https://via.placeholder.com/150', type: 'image/png' });
-});
+// ==================== START SERVER ====================
+async function start() {
+  await connectToDatabase();
+  server.listen(PORT, () => {
+    console.log(`🔒 REVONET SERVER READY`);
+    console.log(`📍 Port ${PORT}`);
+  });
+}
 
 start();
