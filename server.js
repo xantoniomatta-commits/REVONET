@@ -41,6 +41,7 @@ async function connectToDatabase() {
 
 const clients = new Map();
 const userSockets = new Map();
+const channelSubscriptions = new Map(); // Track who's in which channel
 
 wss.on('connection', (ws) => {
   let userId = null;
@@ -59,7 +60,21 @@ wss.on('connection', (ws) => {
       }
       
       else if (msg.type === 'join_channel' && userId) {
+        // Leave previous channel subscription
+        if (currentChannelId) {
+          const subs = channelSubscriptions.get(currentChannelId) || new Set();
+          subs.delete(ws);
+          if (subs.size === 0) channelSubscriptions.delete(currentChannelId);
+          else channelSubscriptions.set(currentChannelId, subs);
+        }
+        
         currentChannelId = msg.channelId;
+        
+        // Join new channel
+        const subs = channelSubscriptions.get(currentChannelId) || new Set();
+        subs.add(ws);
+        channelSubscriptions.set(currentChannelId, subs);
+        
         console.log(`📺 User ${userId} joined channel ${currentChannelId}`);
         
         // Send message history
@@ -68,22 +83,26 @@ wss.on('connection', (ws) => {
             channelId: currentChannelId,
             deleted: { $ne: true }
           }).sort({ timestamp: -1 }).limit(50).toArray();
-          ws.send(JSON.stringify({ type: 'history', channelId: currentChannelId, messages: messages.reverse() }));
+          
+          // Get reactions for these messages
+          const messageIds = messages.map(m => m._id.toString());
+          const reactions = await reactionsCollection.find({ 
+            messageId: { $in: messageIds } 
+          }).toArray();
+          
+          // Get pins for this channel
+          const pins = await pinsCollection.find({ 
+            channelId: currentChannelId 
+          }).sort({ timestamp: -1 }).limit(50).toArray();
+          
+          ws.send(JSON.stringify({ 
+            type: 'history', 
+            channelId: currentChannelId, 
+            messages: messages.reverse(),
+            reactions: reactions,
+            pins: pins
+          }));
         }
-        
-        // Send existing pins
-        const pins = await pinsCollection.find({ channelId: currentChannelId }).sort({ timestamp: -1 }).limit(50).toArray();
-        ws.send(JSON.stringify({ type: 'pins_list', channelId: currentChannelId, pins: pins }));
-        
-        // Send existing reactions
-        const reactions = await reactionsCollection.find({ channelId: currentChannelId }).toArray();
-        ws.send(JSON.stringify({ type: 'reactions_list', channelId: currentChannelId, reactions: reactions }));
-      }
-      
-      else if (msg.type === 'get_reactions') {
-        const { channelId } = msg;
-        const reactions = await reactionsCollection.find({ channelId }).toArray();
-        ws.send(JSON.stringify({ type: 'reactions_list', channelId, reactions }));
       }
       
       else if (msg.type === 'chat' && userId && currentChannelId) {
@@ -93,13 +112,12 @@ wss.on('connection', (ws) => {
           senderName: msg.senderName,
           content: msg.content,
           attachments: msg.attachments || [],
-          replyTo: msg.replyTo || null,  // Make sure this is saved
+          replyTo: msg.replyTo || null,
           mentions: extractMentions(msg.content),
           edited: false,
           deleted: false,
           timestamp: new Date()
         };
-
         
         const result = await serverMessagesCollection.insertOne(message);
         message._id = result.insertedId;
@@ -107,170 +125,295 @@ wss.on('connection', (ws) => {
         broadcastToChannel(currentChannelId, { type: 'message', message });
         
         // Handle mentions
-        message.mentions.forEach(async (username) => {
+        for (const username of message.mentions) {
           const user = await usersCollection.findOne({ username });
           if (user && user._id.toString() !== userId) {
             await notificationsCollection.insertOne({
               userId: user._id,
               type: 'mention',
               read: false,
-              data: { messageId: message._id, channelId: currentChannelId, from: msg.senderName },
+              data: { messageId: message._id.toString(), channelId: currentChannelId, from: msg.senderName },
               createdAt: new Date()
             });
             notifyUser(user._id.toString(), { type: 'notification', content: `${msg.senderName} mentioned you` });
           }
-        });
+        }
       }
       
       else if (msg.type === 'edit_message' && userId) {
-        await serverMessagesCollection.updateOne(
+        const result = await serverMessagesCollection.updateOne(
           { _id: new ObjectId(msg.messageId), senderId: new ObjectId(userId) },
           { $set: { content: msg.content, edited: true, editedAt: new Date() } }
         );
         
-        // Update pin content if this message is pinned
-        const existingPin = await pinsCollection.findOne({ channelId: msg.channelId, messageId: msg.messageId });
-        if (existingPin) {
+        if (result.matchedCount > 0) {
+          // Update pin content if this message is pinned
           await pinsCollection.updateOne(
             { channelId: msg.channelId, messageId: msg.messageId },
             { $set: { content: msg.content.substring(0, 200) } }
           );
+          
+          broadcastToChannel(msg.channelId, { 
+            type: 'message_edited', 
+            messageId: msg.messageId, 
+            content: msg.content, 
+            channelId: msg.channelId 
+          });
         }
-        
-        broadcastToChannel(msg.channelId, { type: 'message_edited', messageId: msg.messageId, content: msg.content, channelId: msg.channelId });
       }
       
       else if (msg.type === 'delete_message' && userId) {
-        await serverMessagesCollection.updateOne(
+        const result = await serverMessagesCollection.updateOne(
           { _id: new ObjectId(msg.messageId), senderId: new ObjectId(userId) },
           { $set: { deleted: true, deletedAt: new Date() } }
         );
         
-        // Delete any pins for this message
-        const pinDeleted = await pinsCollection.deleteOne({ channelId: msg.channelId, messageId: msg.messageId });
-        
-        broadcastToChannel(msg.channelId, { type: 'message_deleted', messageId: msg.messageId, channelId: msg.channelId });
-        
-        // If there was a pin, notify about its removal
-        if (pinDeleted.deletedCount > 0) {
-          broadcastToChannel(msg.channelId, { type: 'pin_removed', channelId: msg.channelId, messageId: msg.messageId });
+        if (result.matchedCount > 0) {
+          // Delete any pins for this message
+          await pinsCollection.deleteOne({ channelId: msg.channelId, messageId: msg.messageId });
+          
+          broadcastToChannel(msg.channelId, { 
+            type: 'message_deleted', 
+            messageId: msg.messageId, 
+            channelId: msg.channelId 
+          });
         }
       }
       
-      else if (msg.type === 'typing' && userId) {
-        broadcastToChannel(msg.channelId, { type: 'typing', userId, username: msg.username }, ws);
-      }
-      
-      // ===== PINS =====
+      // ===== PINS - FIXED =====
       else if (msg.type === 'pin_message' && userId) {
         const { channelId, messageId, content, author } = msg;
-        const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
         
-        // Get actual message content for accuracy
+        // Get user info
+        const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
+        const username = user?.username || 'User';
+        
+        // Get the actual message to verify it exists
         const message = await serverMessagesCollection.findOne({ _id: new ObjectId(messageId) });
-        const pinContent = message?.content || content;
+        if (!message) {
+          console.warn(`⚠️ Cannot pin: Message ${messageId} not found`);
+          return;
+        }
+        
+        const pinContent = message.content.substring(0, 200);
+        
+        // Check if already pinned
+        const existing = await pinsCollection.findOne({ channelId, messageId });
+        if (existing) {
+          console.log(`📌 Message already pinned`);
+          return;
+        }
         
         const pinData = {
-          channelId: channelId,
-          messageId: messageId,
-          content: pinContent.substring(0, 200),
-          author: author,
+          channelId,
+          messageId,
+          content: pinContent,
+          author: message.senderName || author,
           pinnedBy: userId,
-          pinnedByUsername: user?.username || 'User',
+          pinnedByUsername: username,
           timestamp: new Date()
         };
         
-        await pinsCollection.updateOne(
-          { channelId: channelId, messageId: messageId },
-          { $set: pinData },
-          { upsert: true }
-        );
+        await pinsCollection.insertOne(pinData);
         
-        broadcastToChannel(channelId, { type: 'pin_added', channelId: channelId, messageId: messageId });
+        // Send pin_added event to channel
+        broadcastToChannel(channelId, { 
+          type: 'pin_added', 
+          channelId, 
+          messageId,
+          pin: pinData
+        });
         
-        // Send system message
+        // Create system message
         const systemMessage = {
-          channelId: channelId,
+          channelId,
           senderId: 'system',
-          senderName: '',
-          content: `📌 ${pinData.pinnedByUsername} pinned a message.`,
+          senderName: 'System',
+          content: `📌 ${username} pinned a message.`,
+          isSystem: true,
           timestamp: new Date()
         };
-        await serverMessagesCollection.insertOne(systemMessage);
+        
+        const sysResult = await serverMessagesCollection.insertOne(systemMessage);
+        systemMessage._id = sysResult.insertedId;
+        
         broadcastToChannel(channelId, { type: 'message', message: systemMessage });
         
-        console.log(`📌 Message pinned in ${channelId}`);
+        console.log(`📌 Message pinned in ${channelId} by ${username}`);
       }
       
       else if (msg.type === 'unpin_message' && userId) {
         const { channelId, messageId } = msg;
         
-        await pinsCollection.deleteOne({ channelId: channelId, messageId: messageId });
+        const result = await pinsCollection.deleteOne({ channelId, messageId });
         
-        broadcastToChannel(channelId, { type: 'pin_removed', channelId: channelId, messageId: messageId });
-        
-        // Send system message
-        const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
-        const systemMessage = {
-          channelId: channelId,
-          senderId: 'system',
-          senderName: '',
-          content: `📌 ${user?.username || 'User'} unpinned a message.`,
-          timestamp: new Date()
-        };
-        await serverMessagesCollection.insertOne(systemMessage);
-        broadcastToChannel(channelId, { type: 'message', message: systemMessage });
-        
-        console.log(`📌 Message unpinned in ${channelId}`);
+        if (result.deletedCount > 0) {
+          broadcastToChannel(channelId, { 
+            type: 'pin_removed', 
+            channelId, 
+            messageId 
+          });
+          
+          // Get user info for system message
+          const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
+          const username = user?.username || 'User';
+          
+          const systemMessage = {
+            channelId,
+            senderId: 'system',
+            senderName: 'System',
+            content: `📌 ${username} unpinned a message.`,
+            isSystem: true,
+            timestamp: new Date()
+          };
+          
+          const sysResult = await serverMessagesCollection.insertOne(systemMessage);
+          systemMessage._id = sysResult.insertedId;
+          
+          broadcastToChannel(channelId, { type: 'message', message: systemMessage });
+          
+          console.log(`📌 Message unpinned in ${channelId}`);
+        }
       }
       
       else if (msg.type === 'get_pins') {
         const { channelId } = msg;
-        const pins = await pinsCollection.find({ channelId: channelId }).sort({ timestamp: -1 }).limit(50).toArray();
-        ws.send(JSON.stringify({ type: 'pins_list', channelId: channelId, pins: pins }));
+        const pins = await pinsCollection.find({ channelId }).sort({ timestamp: -1 }).limit(50).toArray();
+        ws.send(JSON.stringify({ type: 'pins_list', channelId, pins }));
       }
       
-      // ===== REACTIONS =====
+      // ===== REACTIONS - FIXED =====
       else if (msg.type === 'reaction' && userId) {
         const { channelId, messageId, emoji } = msg;
         
+        console.log(`😊 Reaction: ${emoji} on ${messageId} by ${userId}`);
+        
+        // Verify message exists
+        const message = await serverMessagesCollection.findOne({ _id: new ObjectId(messageId) });
+        if (!message) {
+          console.warn(`⚠️ Cannot react: Message ${messageId} not found`);
+          return;
+        }
+        
         const key = `${channelId}_${messageId}_${emoji}`;
-        const existing = await reactionsCollection.findOne({ key: key });
+        const existing = await reactionsCollection.findOne({ key });
+        
+        let action = 'added';
         
         if (existing) {
           if (existing.users && existing.users.includes(userId)) {
-            await reactionsCollection.updateOne({ key: key }, { $pull: { users: userId } });
+            // Remove reaction
+            await reactionsCollection.updateOne(
+              { key }, 
+              { $pull: { users: userId } }
+            );
+            action = 'removed';
           } else {
-            await reactionsCollection.updateOne({ key: key }, { $addToSet: { users: userId } });
+            // Add reaction
+            await reactionsCollection.updateOne(
+              { key }, 
+              { $addToSet: { users: userId } }
+            );
+            action = 'added';
           }
         } else {
+          // Create new reaction
           await reactionsCollection.insertOne({
-            key: key,
-            channelId: channelId,
-            messageId: messageId,
-            emoji: emoji,
+            key,
+            channelId,
+            messageId,
+            emoji,
             users: [userId],
             timestamp: new Date()
           });
+          action = 'added';
         }
         
         // Clean up if empty
-        const updated = await reactionsCollection.findOne({ key: key });
+        const updated = await reactionsCollection.findOne({ key });
         if (updated && (!updated.users || updated.users.length === 0)) {
-          await reactionsCollection.deleteOne({ key: key });
+          await reactionsCollection.deleteOne({ key });
         }
         
-        // Get updated reactions for this message
-        const allReactions = await reactionsCollection.find({ messageId: messageId }).toArray();
+        // Get ALL reactions for this message
+        const allReactions = await reactionsCollection.find({ messageId }).toArray();
         
+        // Format for client
+        const formattedReactions = allReactions.map(r => ({
+          emoji: r.emoji,
+          users: r.users || [],
+          count: (r.users || []).length
+        }));
+        
+        // Broadcast to everyone in the channel
         broadcastToChannel(channelId, {
           type: 'reaction_update',
-          channelId: channelId,
-          messageId: messageId,
-          reactions: allReactions
+          channelId,
+          messageId,
+          reactions: formattedReactions,
+          action,
+          emoji,
+          userId
         });
         
-        console.log(`😊 Reaction updated on ${messageId}`);
+        console.log(`😊 Reaction ${action}: ${emoji} on ${messageId}`);
+      }
+      
+      else if (msg.type === 'get_reactions') {
+        const { channelId, messageId } = msg;
+        const reactions = await reactionsCollection.find({ messageId }).toArray();
+        const formatted = reactions.map(r => ({
+          emoji: r.emoji,
+          users: r.users || [],
+          count: (r.users || []).length
+        }));
+        ws.send(JSON.stringify({ 
+          type: 'reactions_list', 
+          channelId, 
+          messageId, 
+          reactions: formatted 
+        }));
+      }
+      
+      else if (msg.type === 'typing' && userId) {
+        broadcastToChannel(msg.channelId, { 
+          type: 'typing', 
+          userId, 
+          username: msg.username 
+        }, ws);
+      }
+      
+      // ===== DM HANDLERS =====
+      else if (msg.type === 'dm_chat' && userId) {
+        const { conversationId, recipientId, senderName, content } = msg;
+        
+        let conv = await conversationsCollection.findOne({ _id: conversationId });
+        if (!conv) {
+          const result = await conversationsCollection.insertOne({
+            participants: [new ObjectId(userId), new ObjectId(recipientId)],
+            createdAt: new Date()
+          });
+          conv = { _id: result.insertedId };
+        }
+        
+        const message = {
+          conversationId: conv._id.toString(),
+          senderId: new ObjectId(userId),
+          senderName,
+          content,
+          timestamp: new Date()
+        };
+        
+        await dmMessagesCollection.insertOne(message);
+        
+        // Send to sender
+        ws.send(JSON.stringify({ type: 'dm_chat', conversationId: conv._id.toString(), ...message }));
+        
+        // Send to recipient if online
+        const recipientWs = userSockets.get(recipientId);
+        if (recipientWs && recipientWs.readyState === WebSocket.OPEN) {
+          recipientWs.send(JSON.stringify({ type: 'dm_chat', conversationId: conv._id.toString(), ...message }));
+        }
       }
       
     } catch (e) {
@@ -283,17 +426,31 @@ wss.on('connection', (ws) => {
       console.log(`❌ User ${userId} disconnected`);
       userSockets.delete(userId);
       clients.delete(ws);
+      
+      // Remove from channel subscriptions
+      if (currentChannelId) {
+        const subs = channelSubscriptions.get(currentChannelId);
+        if (subs) {
+          subs.delete(ws);
+          if (subs.size === 0) channelSubscriptions.delete(currentChannelId);
+        }
+      }
+      
       broadcastUserStatus(userId, 'offline');
     }
   });
 });
 
 function broadcastToChannel(channelId, message, excludeWs = null) {
-  clients.forEach((data, ws) => {
-    if (ws !== excludeWs && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(message));
-    }
-  });
+  const subs = channelSubscriptions.get(channelId);
+  if (subs) {
+    const msgStr = JSON.stringify(message);
+    subs.forEach(ws => {
+      if (ws !== excludeWs && ws.readyState === WebSocket.OPEN) {
+        ws.send(msgStr);
+      }
+    });
+  }
 }
 
 function broadcastUserStatus(userId, status) {
@@ -415,7 +572,27 @@ app.get('/api/channels/:channelId/messages', async (req, res) => {
       channelId: channelId,
       deleted: { $ne: true }
     }).sort({ timestamp: -1 }).limit(100).toArray();
-    res.json({ messages: messages.reverse() });
+    
+    // Get reactions for these messages
+    const messageIds = messages.map(m => m._id.toString());
+    const reactions = await reactionsCollection.find({ 
+      messageId: { $in: messageIds } 
+    }).toArray();
+    
+    const formattedReactions = {};
+    reactions.forEach(r => {
+      if (!formattedReactions[r.messageId]) formattedReactions[r.messageId] = [];
+      formattedReactions[r.messageId].push({
+        emoji: r.emoji,
+        users: r.users || [],
+        count: (r.users || []).length
+      });
+    });
+    
+    res.json({ 
+      messages: messages.reverse(),
+      reactions: formattedReactions
+    });
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
   }
@@ -517,6 +694,12 @@ app.post('/api/friends/request', async (req, res) => {
       status: 'pending', createdAt: new Date()
     });
     
+    // Notify the recipient
+    notifyUser(target._id.toString(), { 
+      type: 'friend_request', 
+      from: senderId 
+    });
+    
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
@@ -557,7 +740,7 @@ app.get('/api/dm/conversations', async (req, res) => {
       const otherId = conv.participants.find(id => id.toString() !== userId);
       const otherUser = await usersCollection.findOne({ _id: otherId });
       const lastMsg = await dmMessagesCollection.findOne(
-        { conversationId: conv._id },
+        { conversationId: conv._id.toString() },
         { sort: { timestamp: -1 } }
       );
       return {
@@ -589,6 +772,7 @@ async function start() {
   server.listen(PORT, () => {
     console.log(`🔒 REVONET SERVER READY`);
     console.log(`📍 Port ${PORT}`);
+    console.log(`📡 WebSocket server running`);
   });
 }
 
