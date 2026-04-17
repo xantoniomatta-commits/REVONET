@@ -190,6 +190,11 @@ wss.on('connection', (ws) => {
         const reactions = await reactionsCollection.find({ channelId }).toArray();
         ws.send(JSON.stringify({ type: 'reactions_list', channelId, reactions }));
       }
+      else if (msg.type === 'get_reactions') {
+        const { channelId } = msg;
+        const reactions = await reactionsCollection.find({ channelId }).toArray();
+        ws.send(JSON.stringify({ type: 'reactions_list', channelId, reactions }));
+      }
       // ===== REACTIONS =====
       else if (msg.type === 'reaction' && userId) {
         const { channelId, messageId, emoji } = msg;
