@@ -426,7 +426,16 @@ app.get('/api/servers/:serverId/members', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch members' });
   }
 });
-
+// Add this with your other API routes
+app.get('/api/channels/:channelId/pins', async (req, res) => {
+  try {
+    const { channelId } = req.params;
+    const pins = await pinsCollection.find({ channelId }).sort({ timestamp: -1 }).limit(50).toArray();
+    res.json({ pins });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
 app.get('/api/users/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
