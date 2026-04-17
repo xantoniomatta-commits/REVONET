@@ -93,12 +93,13 @@ wss.on('connection', (ws) => {
           senderName: msg.senderName,
           content: msg.content,
           attachments: msg.attachments || [],
-          replyTo: msg.replyTo || null,
+          replyTo: msg.replyTo || null,  // Make sure this is saved
           mentions: extractMentions(msg.content),
           edited: false,
           deleted: false,
           timestamp: new Date()
         };
+
         
         const result = await serverMessagesCollection.insertOne(message);
         message._id = result.insertedId;
