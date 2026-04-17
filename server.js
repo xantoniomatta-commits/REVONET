@@ -183,7 +183,13 @@ wss.on('connection', (ws) => {
         const pins = await pinsCollection.find({ channelId: channelId }).sort({ timestamp: -1 }).limit(50).toArray();
         ws.send(JSON.stringify({ type: 'pins_list', channelId: channelId, pins: pins }));
       }
-      
+
+        // Add this with your other WebSocket message handlers
+      else if (msg.type === 'get_reactions') {
+        const { channelId } = msg;
+        const reactions = await reactionsCollection.find({ channelId }).toArray();
+        ws.send(JSON.stringify({ type: 'reactions_list', channelId, reactions }));
+      }
       // ===== REACTIONS =====
       else if (msg.type === 'reaction' && userId) {
         const { channelId, messageId, emoji } = msg;
