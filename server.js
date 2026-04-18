@@ -234,6 +234,13 @@ app.post('/api/friends/request', async (req, res) => {
       timestamp: new Date()
     });
 
+    // Notify receiver via WebSocket
+    broadcastToUser(receiver._id.toString(), {
+      type: 'friend_request',
+      senderId,
+      senderName: (await usersCollection.findOne({ _id: new ObjectId(senderId) }))?.username
+    });
+
     res.json({ success: true });
   } catch (error) {
     console.error('Friend request error:', error);
@@ -245,6 +252,8 @@ app.get('/api/friends/status', async (req, res) => {
   try {
     const { userId, otherId } = req.query;
     if (!userId || !otherId) return res.status(400).json({ error: 'Missing IDs' });
+
+    if (userId === otherId) return res.json({ status: 'self' });
 
     const friendship = await friendsCollection.findOne({
       $or: [
@@ -294,10 +303,21 @@ app.post('/api/friends/accept', async (req, res) => {
     const { requestId, userId } = req.body;
     if (!requestId || !userId) return res.status(400).json({ error: 'Missing parameters' });
 
+    const request = await friendsCollection.findOne({ _id: new ObjectId(requestId) });
+    if (!request) return res.status(404).json({ error: 'Request not found' });
+
     await friendsCollection.updateOne(
       { _id: new ObjectId(requestId), receiverId: userId },
       { $set: { status: 'accepted' } }
     );
+
+    // Notify original sender
+    broadcastToUser(request.senderId, {
+      type: 'friend_accepted',
+      userId,
+      username: (await usersCollection.findOne({ _id: new ObjectId(userId) }))?.username
+    });
+
     res.json({ success: true });
   } catch (error) {
     console.error('Accept friend error:', error);
@@ -310,9 +330,20 @@ app.post('/api/friends/decline', async (req, res) => {
     const { requestId, userId } = req.body;
     if (!requestId || !userId) return res.status(400).json({ error: 'Missing parameters' });
 
+    const request = await friendsCollection.findOne({ _id: new ObjectId(requestId) });
+    if (!request) return res.status(404).json({ error: 'Request not found' });
+
     await friendsCollection.deleteOne(
       { _id: new ObjectId(requestId), receiverId: userId }
     );
+
+    // Notify original sender (optional)
+    broadcastToUser(request.senderId, {
+      type: 'friend_declined',
+      userId,
+      username: (await usersCollection.findOne({ _id: new ObjectId(userId) }))?.username
+    });
+
     res.json({ success: true });
   } catch (error) {
     console.error('Decline friend error:', error);
@@ -531,6 +562,15 @@ function broadcast(data) {
   const payload = JSON.stringify(data);
   wss.clients.forEach(client => {
     if (client.readyState === WebSocket.OPEN) {
+      client.send(payload);
+    }
+  });
+}
+
+function broadcastToUser(userId, data) {
+  const payload = JSON.stringify(data);
+  wss.clients.forEach(client => {
+    if (clients.get(client) === userId && client.readyState === WebSocket.OPEN) {
       client.send(payload);
     }
   });
