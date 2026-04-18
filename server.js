@@ -262,6 +262,55 @@ app.get('/api/dm/conversations', async (req, res) => {
   }
 });
 
+// === Server Members API ===
+app.get('/api/servers/:serverId/members', async (req, res) => {
+  try {
+    const { serverId } = req.params;
+    
+    if (!ObjectId.isValid(serverId)) {
+      return res.status(400).json({ error: 'Invalid server ID' });
+    }
+
+    const server = await serversCollection.findOne({ _id: new ObjectId(serverId) });
+    if (!server) return res.status(404).json({ error: 'Server not found' });
+    
+    const memberIds = server.members || [];
+    const members = [];
+    
+    for (const memberId of memberIds) {
+      if (ObjectId.isValid(memberId)) {
+        const user = await usersCollection.findOne({ _id: new ObjectId(memberId) });
+        if (user) {
+          members.push({
+            id: user._id.toString(),
+            username: user.username,
+            status: 'offline'
+          });
+        }
+      }
+    }
+    
+    res.json({ members });
+  } catch (error) {
+    console.error('Get server members error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// === Channel Messages API ===
+app.get('/api/channels/:channelId/messages', async (req, res) => {
+  try {
+    const { channelId } = req.params;
+    
+    const messages = await messagesCollection.find({ channelId }).sort({ timestamp: 1 }).toArray();
+    
+    res.json({ messages });
+  } catch (error) {
+    console.error('Get channel messages error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Join server via invite code
 app.post('/api/servers/join', async (req, res) => {
   try {
