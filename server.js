@@ -677,15 +677,32 @@ wss.on('connection', (ws) => {
             timestamp: new Date()
           };
           await messagesCollection.insertOne(sysMsg);
-          broadcast({ type: 'message', ...sysMsg });
+
+          const isDM = pChanId.includes('-');
+          const participants = isDM ? pChanId.split('-') : null;
+
+          if (isDM) {
+            participants.forEach(pid => broadcastToUser(pid, { type: 'message', ...sysMsg }));
+          } else {
+            broadcast({ type: 'message', ...sysMsg });
+          }
 
           const allPins = await pinsCollection.find({ channelId: pChanId }).toArray();
-          broadcast({
-            type: 'pin_added',
-            messageId: pMsgId,
-            channelId: pChanId,
-            pins: allPins
-          });
+          if (isDM) {
+            participants.forEach(pid => broadcastToUser(pid, {
+              type: 'pin_added',
+              messageId: pMsgId,
+              channelId: pChanId,
+              pins: allPins
+            }));
+          } else {
+            broadcast({
+              type: 'pin_added',
+              messageId: pMsgId,
+              channelId: pChanId,
+              pins: allPins
+            });
+          }
           break;
         }
 
@@ -703,15 +720,32 @@ wss.on('connection', (ws) => {
             timestamp: new Date()
           };
           await messagesCollection.insertOne(sysMsg);
-          broadcast({ type: 'message', ...sysMsg });
+
+          const isDM = uChanId.includes('-');
+          const participants = isDM ? uChanId.split('-') : null;
+
+          if (isDM) {
+            participants.forEach(pid => broadcastToUser(pid, { type: 'message', ...sysMsg }));
+          } else {
+            broadcast({ type: 'message', ...sysMsg });
+          }
 
           const remainingPins = await pinsCollection.find({ channelId: uChanId }).toArray();
-          broadcast({
-            type: 'pin_removed',
-            messageId: uMsgId,
-            channelId: uChanId,
-            pins: remainingPins
-          });
+          if (isDM) {
+            participants.forEach(pid => broadcastToUser(pid, {
+              type: 'pin_removed',
+              messageId: uMsgId,
+              channelId: uChanId,
+              pins: remainingPins
+            }));
+          } else {
+            broadcast({
+              type: 'pin_removed',
+              messageId: uMsgId,
+              channelId: uChanId,
+              pins: remainingPins
+            });
+          }
           break;
         }
 
