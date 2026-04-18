@@ -178,24 +178,113 @@ app.get('/api/friends/pending', async (req, res) => {
     const { userId } = req.query;
     if (!userId) return res.status(400).json({ error: 'User ID required' });
 
-    const requests = await friendsCollection.find({
+    const incoming = await friendsCollection.find({
       receiverId: userId,
       status: 'pending'
     }).toArray();
 
-    // Enrich with sender username
-    for (const reqObj of requests) {
-      if (ObjectId.isValid(reqObj.senderId)) {
-        const sender = await usersCollection.findOne({ _id: new ObjectId(reqObj.senderId) });
-        if (sender) {
-          reqObj.senderUsername = sender.username;
-        }
-      }
+    const outgoing = await friendsCollection.find({
+      senderId: userId,
+      status: 'pending'
+    }).toArray();
+
+    // Enrich incoming
+    for (const reqObj of incoming) {
+      const sender = await usersCollection.findOne({ _id: new ObjectId(reqObj.senderId) });
+      if (sender) reqObj.username = sender.username;
     }
 
-    res.json({ requests });
+    // Enrich outgoing
+    for (const reqObj of outgoing) {
+      const receiver = await usersCollection.findOne({ _id: new ObjectId(reqObj.receiverId) });
+      if (receiver) reqObj.username = receiver.username;
+    }
+
+    res.json({ incoming, outgoing });
   } catch (error) {
     console.error('Get pending friends error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/friends/request', async (req, res) => {
+  try {
+    const { senderId, receiverUsername } = req.body;
+    if (!senderId || !receiverUsername) return res.status(400).json({ error: 'Missing parameters' });
+
+    const receiver = await usersCollection.findOne({ username: receiverUsername });
+    if (!receiver) return res.status(404).json({ error: 'User not found' });
+    
+    if (receiver._id.toString() === senderId) return res.status(400).json({ error: 'Cannot friend yourself' });
+
+    // Check existing
+    const existing = await friendsCollection.findOne({
+      $or: [
+        { senderId: senderId, receiverId: receiver._id.toString() },
+        { senderId: receiver._id.toString(), receiverId: senderId }
+      ]
+    });
+
+    if (existing) return res.status(400).json({ error: 'Friendship or request already exists' });
+
+    await friendsCollection.insertOne({
+      senderId,
+      receiverId: receiver._id.toString(),
+      status: 'pending',
+      timestamp: new Date()
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Friend request error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/friends/status', async (req, res) => {
+  try {
+    const { userId, otherId } = req.query;
+    if (!userId || !otherId) return res.status(400).json({ error: 'Missing IDs' });
+
+    const friendship = await friendsCollection.findOne({
+      $or: [
+        { senderId: userId, receiverId: otherId },
+        { senderId: otherId, receiverId: userId }
+      ]
+    });
+
+    if (!friendship) return res.json({ status: 'none' });
+    if (friendship.status === 'accepted') return res.json({ status: 'friends' });
+    
+    if (friendship.senderId === userId) return res.json({ status: 'outgoing', requestId: friendship._id });
+    return res.json({ status: 'incoming', requestId: friendship._id });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/friends/remove', async (req, res) => {
+  try {
+    const { userId, otherId } = req.body;
+    await friendsCollection.deleteOne({
+      $or: [
+        { senderId: userId, receiverId: otherId },
+        { senderId: otherId, receiverId: userId }
+      ],
+      status: 'accepted'
+    });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/friends/cancel', async (req, res) => {
+  try {
+    const { requestId, userId } = req.body;
+    await friendsCollection.deleteOne({ _id: new ObjectId(requestId), senderId: userId });
+    res.json({ success: true });
+  } catch (error) {
     res.status(500).json({ error: 'Server error' });
   }
 });
