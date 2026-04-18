@@ -19,8 +19,10 @@ const SERVERS_COLLECTION = 'servers';
 const MESSAGES_COLLECTION = 'messages';
 const PINS_COLLECTION = 'pins';
 const REACTIONS_COLLECTION = 'reactions';
+const FRIENDS_COLLECTION = 'friends';
+const DM_CONVERSATIONS_COLLECTION = 'dm_conversations';
 
-let db, usersCollection, serversCollection, messagesCollection, pinsCollection, reactionsCollection;
+let db, usersCollection, serversCollection, messagesCollection, pinsCollection, reactionsCollection, friendsCollection, dmConversationsCollection;
 
 async function connectToDatabase() {
   try {
@@ -32,6 +34,8 @@ async function connectToDatabase() {
     messagesCollection = db.collection(MESSAGES_COLLECTION);
     pinsCollection = db.collection(PINS_COLLECTION);
     reactionsCollection = db.collection(REACTIONS_COLLECTION);
+    friendsCollection = db.collection(FRIENDS_COLLECTION);
+    dmConversationsCollection = db.collection(DM_CONVERSATIONS_COLLECTION);
     console.log(`✅ Connected to MongoDB: ${DB_NAME}`);
   } catch (error) {
     console.error('❌ MongoDB connection failed:', error);
@@ -117,12 +121,12 @@ app.post('/api/login', async (req, res) => {
 });
 
 // Get user's servers
-app.get('/api/user/servers', async (req, res) => {
+app.get('/api/servers', async (req, res) => {
   try {
     const { userId } = req.query;
     if (!userId) return res.status(400).json({ error: 'User ID required' });
 
-    const user = await usersCollection.findOne({ _id: new MongoClient.ObjectId(userId) });
+    const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     // Get full server details for each server ID
@@ -132,6 +136,128 @@ app.get('/api/user/servers', async (req, res) => {
     res.json({ servers });
   } catch (error) {
     console.error('Get servers error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// === Friends API ===
+app.get('/api/friends', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ error: 'User ID required' });
+    
+    const friendships = await friendsCollection.find({
+      $or: [{ senderId: userId }, { receiverId: userId }],
+      status: 'accepted'
+    }).toArray();
+    
+    const friendIds = friendships.map(f => f.senderId === userId ? f.receiverId : f.senderId);
+    
+    const friends = [];
+    for (const fid of friendIds) {
+      if (!ObjectId.isValid(fid)) continue;
+      const fUser = await usersCollection.findOne({ _id: new ObjectId(fid) });
+      if (fUser) {
+        friends.push({
+          id: fUser._id.toString(),
+          username: fUser.username,
+          status: 'offline' // default status
+        });
+      }
+    }
+    
+    res.json({ friends });
+  } catch (error) {
+    console.error('Get friends error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/friends/pending', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ error: 'User ID required' });
+    
+    const requests = await friendsCollection.find({
+      receiverId: userId,
+      status: 'pending'
+    }).toArray();
+    
+    // Enrich with sender username
+    for (const reqObj of requests) {
+      if (ObjectId.isValid(reqObj.senderId)) {
+        const sender = await usersCollection.findOne({ _id: new ObjectId(reqObj.senderId) });
+        if (sender) {
+          reqObj.senderUsername = sender.username;
+        }
+      }
+    }
+    
+    res.json({ requests });
+  } catch (error) {
+    console.error('Get pending friends error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/friends/accept', async (req, res) => {
+  try {
+    const { requestId, userId } = req.body;
+    if (!requestId || !userId) return res.status(400).json({ error: 'Missing parameters' });
+    
+    await friendsCollection.updateOne(
+      { _id: new ObjectId(requestId), receiverId: userId },
+      { $set: { status: 'accepted' } }
+    );
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Accept friend error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/friends/decline', async (req, res) => {
+  try {
+    const { requestId, userId } = req.body;
+    if (!requestId || !userId) return res.status(400).json({ error: 'Missing parameters' });
+    
+    await friendsCollection.deleteOne(
+      { _id: new ObjectId(requestId), receiverId: userId }
+    );
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Decline friend error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// === DM API ===
+app.get('/api/dm/conversations', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ error: 'User ID required' });
+    
+    const convos = await dmConversationsCollection.find({
+      participants: userId
+    }).toArray();
+    
+    // Enrich with other user's info
+    for (const conv of convos) {
+      const otherUserId = conv.participants.find(id => id !== userId);
+      if (otherUserId && ObjectId.isValid(otherUserId)) {
+        const otherUser = await usersCollection.findOne({ _id: new ObjectId(otherUserId) });
+        if (otherUser) {
+          conv.otherUser = {
+            _id: otherUser._id.toString(),
+            username: otherUser.username
+          };
+        }
+      }
+    }
+    
+    res.json({ conversations: convos });
+  } catch (error) {
+    console.error('Get DMs error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
