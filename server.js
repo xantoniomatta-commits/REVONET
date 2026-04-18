@@ -653,8 +653,20 @@ wss.on('connection', (ws) => {
           };
           await messagesCollection.insertOne(newDM);
 
-          // Find recipient and send to them
+          // Ensure conversation exists
           const participants = msg.conversationId.split('-');
+          await dmConversationsCollection.updateOne(
+            { _id: msg.conversationId },
+            { 
+              $set: { 
+                participants, 
+                lastMessage: msg.content, 
+                lastTimestamp: new Date() 
+              } 
+            },
+            { upsert: true }
+          );
+
           const recipientId = participants.find(id => id !== newDM.senderId);
 
           // Send to sender and recipient if online
