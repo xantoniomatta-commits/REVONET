@@ -484,12 +484,29 @@ wss.on('connection', (ws) => {
         }
 
         case 'pin_message': {
-          const { messageId: pMsgId, channelId: pChanId, content: pContent, author: pAuthor } = msg;
+          const { messageId: pMsgId, channelId: pChanId, content: pContent, author: pAuthor, senderName: pSenderName } = msg;
+          
+          // Check if already pinned
+          const existing = await pinsCollection.findOne({ messageId: pMsgId });
+          if (existing) return;
+
           await pinsCollection.updateOne(
             { messageId: pMsgId },
             { $set: { channelId: pChanId, content: pContent, author: pAuthor, timestamp: new Date() } },
             { upsert: true }
           );
+
+          // Add system message
+          const sysMsg = {
+            _id: new ObjectId().toString(),
+            channelId: pChanId,
+            senderId: 'system',
+            isSystem: true,
+            content: `${pSenderName || 'Someone'} pinned a message to this channel.`,
+            timestamp: new Date()
+          };
+          await messagesCollection.insertOne(sysMsg);
+          broadcast({ type: 'message', ...sysMsg });
 
           const allPins = await pinsCollection.find({ channelId: pChanId }).toArray();
           broadcast({
@@ -502,8 +519,20 @@ wss.on('connection', (ws) => {
         }
 
         case 'unpin_message': {
-          const { messageId: uMsgId, channelId: uChanId } = msg;
+          const { messageId: uMsgId, channelId: uChanId, senderName: uSenderName } = msg;
           await pinsCollection.deleteOne({ messageId: uMsgId });
+
+          // Add system message
+          const sysMsg = {
+            _id: new ObjectId().toString(),
+            channelId: uChanId,
+            senderId: 'system',
+            isSystem: true,
+            content: `${uSenderName || 'Someone'} unpinned a message from this channel.`,
+            timestamp: new Date()
+          };
+          await messagesCollection.insertOne(sysMsg);
+          broadcast({ type: 'message', ...sysMsg });
 
           const remainingPins = await pinsCollection.find({ channelId: uChanId }).toArray();
           broadcast({
@@ -532,6 +561,13 @@ wss.on('connection', (ws) => {
             { _id: eMsgId },
             { $set: { content: eContent, edited: true } }
           );
+
+          // Update pin if it exists
+          await pinsCollection.updateOne(
+            { messageId: eMsgId },
+            { $set: { content: eContent } }
+          );
+
           broadcast({
             type: 'message_edited',
             messageId: eMsgId,
