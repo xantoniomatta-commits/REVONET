@@ -145,14 +145,14 @@ app.get('/api/friends', async (req, res) => {
   try {
     const { userId } = req.query;
     if (!userId) return res.status(400).json({ error: 'User ID required' });
-    
+
     const friendships = await friendsCollection.find({
       $or: [{ senderId: userId }, { receiverId: userId }],
       status: 'accepted'
     }).toArray();
-    
+
     const friendIds = friendships.map(f => f.senderId === userId ? f.receiverId : f.senderId);
-    
+
     const friends = [];
     for (const fid of friendIds) {
       if (!ObjectId.isValid(fid)) continue;
@@ -165,7 +165,7 @@ app.get('/api/friends', async (req, res) => {
         });
       }
     }
-    
+
     res.json({ friends });
   } catch (error) {
     console.error('Get friends error:', error);
@@ -177,12 +177,12 @@ app.get('/api/friends/pending', async (req, res) => {
   try {
     const { userId } = req.query;
     if (!userId) return res.status(400).json({ error: 'User ID required' });
-    
+
     const requests = await friendsCollection.find({
       receiverId: userId,
       status: 'pending'
     }).toArray();
-    
+
     // Enrich with sender username
     for (const reqObj of requests) {
       if (ObjectId.isValid(reqObj.senderId)) {
@@ -192,7 +192,7 @@ app.get('/api/friends/pending', async (req, res) => {
         }
       }
     }
-    
+
     res.json({ requests });
   } catch (error) {
     console.error('Get pending friends error:', error);
@@ -204,7 +204,7 @@ app.post('/api/friends/accept', async (req, res) => {
   try {
     const { requestId, userId } = req.body;
     if (!requestId || !userId) return res.status(400).json({ error: 'Missing parameters' });
-    
+
     await friendsCollection.updateOne(
       { _id: new ObjectId(requestId), receiverId: userId },
       { $set: { status: 'accepted' } }
@@ -220,7 +220,7 @@ app.post('/api/friends/decline', async (req, res) => {
   try {
     const { requestId, userId } = req.body;
     if (!requestId || !userId) return res.status(400).json({ error: 'Missing parameters' });
-    
+
     await friendsCollection.deleteOne(
       { _id: new ObjectId(requestId), receiverId: userId }
     );
@@ -236,11 +236,11 @@ app.get('/api/dm/conversations', async (req, res) => {
   try {
     const { userId } = req.query;
     if (!userId) return res.status(400).json({ error: 'User ID required' });
-    
+
     const convos = await dmConversationsCollection.find({
       participants: userId
     }).toArray();
-    
+
     // Enrich with other user's info
     for (const conv of convos) {
       const otherUserId = conv.participants.find(id => id !== userId);
@@ -254,10 +254,52 @@ app.get('/api/dm/conversations', async (req, res) => {
         }
       }
     }
-    
+
     res.json({ conversations: convos });
   } catch (error) {
     console.error('Get DMs error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/dm/messages', async (req, res) => {
+  try {
+    const { conversationId, userId } = req.query;
+    if (!conversationId || !userId) return res.status(400).json({ error: 'Conversation ID and User ID required' });
+
+    // Check if user is participant
+    const participants = conversationId.split('-');
+    if (!participants.includes(userId)) return res.status(403).json({ error: 'Access denied' });
+
+    const messages = await messagesCollection.find({
+      conversationId: conversationId
+    }).sort({ timestamp: 1 }).toArray();
+
+    res.json({ messages });
+  } catch (error) {
+    console.error('Get DM messages error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/users/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!ObjectId.isValid(userId)) return res.status(400).json({ error: 'Invalid user ID' });
+
+    const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    res.json({
+      user: {
+        _id: user._id,
+        username: user.username,
+        createdAt: user.createdAt,
+        bio: user.bio || 'No bio yet.'
+      }
+    });
+  } catch (error) {
+    console.error('Get user error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -266,17 +308,17 @@ app.get('/api/dm/conversations', async (req, res) => {
 app.get('/api/servers/:serverId/members', async (req, res) => {
   try {
     const { serverId } = req.params;
-    
+
     if (!ObjectId.isValid(serverId)) {
       return res.status(400).json({ error: 'Invalid server ID' });
     }
 
     const server = await serversCollection.findOne({ _id: new ObjectId(serverId) });
     if (!server) return res.status(404).json({ error: 'Server not found' });
-    
+
     const memberIds = server.members || [];
     const members = [];
-    
+
     for (const memberId of memberIds) {
       if (ObjectId.isValid(memberId)) {
         const user = await usersCollection.findOne({ _id: new ObjectId(memberId) });
@@ -289,7 +331,7 @@ app.get('/api/servers/:serverId/members', async (req, res) => {
         }
       }
     }
-    
+
     res.json({ members });
   } catch (error) {
     console.error('Get server members error:', error);
@@ -301,9 +343,9 @@ app.get('/api/servers/:serverId/members', async (req, res) => {
 app.get('/api/channels/:channelId/messages', async (req, res) => {
   try {
     const { channelId } = req.params;
-    
+
     const messages = await messagesCollection.find({ channelId }).sort({ timestamp: 1 }).toArray();
-    
+
     res.json({ messages });
   } catch (error) {
     console.error('Get channel messages error:', error);
@@ -485,7 +527,7 @@ wss.on('connection', (ws) => {
 
         case 'pin_message': {
           const { messageId: pMsgId, channelId: pChanId, content: pContent, author: pAuthor, senderName: pSenderName } = msg;
-          
+
           // Check if already pinned
           const existing = await pinsCollection.findOne({ messageId: pMsgId });
           if (existing) return;
@@ -596,6 +638,34 @@ wss.on('connection', (ws) => {
           broadcast({
             type: 'message_deleted',
             messageId: dMsgId
+          });
+          break;
+        }
+
+        case 'dm_chat': {
+          const newDM = {
+            _id: new ObjectId().toString(),
+            conversationId: msg.conversationId,
+            senderId: clients.get(ws) || msg.userId,
+            senderName: msg.senderName,
+            content: msg.content,
+            timestamp: new Date()
+          };
+          await messagesCollection.insertOne(newDM);
+
+          // Find recipient and send to them
+          const participants = msg.conversationId.split('-');
+          const recipientId = participants.find(id => id !== newDM.senderId);
+
+          // Send to sender and recipient if online
+          wss.clients.forEach(client => {
+            const userId = clients.get(client);
+            if (userId === newDM.senderId || userId === recipientId) {
+              client.send(JSON.stringify({
+                type: 'dm_chat',
+                ...newDM
+              }));
+            }
           });
           break;
         }
