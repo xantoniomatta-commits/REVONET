@@ -778,6 +778,7 @@ wss.on('connection', (ws) => {
             senderId: clients.get(ws) || msg.userId,
             senderName: msg.senderName,
             content: msg.content,
+            replyTo: msg.replyTo,
             timestamp: new Date()
           };
           await messagesCollection.insertOne(newDM);
