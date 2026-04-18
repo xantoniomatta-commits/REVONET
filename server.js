@@ -49,20 +49,20 @@ app.use(express.json());
 app.post('/api/register', async (req, res) => {
   try {
     const { email, password, username } = req.body;
-    
+
     if (!email || !password || !username) {
       return res.status(400).json({ error: 'All fields required' });
     }
-    
+
     // Check if user already exists
     const existing = await usersCollection.findOne({ email: email.toLowerCase() });
     if (existing) {
       return res.status(400).json({ error: 'Email already registered' });
     }
-    
+
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
-    
+
     // Create user
     const result = await usersCollection.insertOne({
       email: email.toLowerCase(),
@@ -71,7 +71,7 @@ app.post('/api/register', async (req, res) => {
       createdAt: new Date(),
       servers: []
     });
-    
+
     res.json({ success: true, userId: result.insertedId });
   } catch (error) {
     console.error('Register error:', error);
@@ -83,23 +83,23 @@ app.post('/api/register', async (req, res) => {
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    
+
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password required' });
     }
-    
+
     // Find user
     const user = await usersCollection.findOne({ email: email.toLowerCase() });
     if (!user) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
-    
+
     // Check password
     const validPassword = await bcrypt.compare(password, user.password);
     if (!validPassword) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
-    
+
     // Return user data (never return password)
     res.json({
       success: true,
@@ -121,14 +121,14 @@ app.get('/api/user/servers', async (req, res) => {
   try {
     const { userId } = req.query;
     if (!userId) return res.status(400).json({ error: 'User ID required' });
-    
+
     const user = await usersCollection.findOne({ _id: new MongoClient.ObjectId(userId) });
     if (!user) return res.status(404).json({ error: 'User not found' });
-    
+
     // Get full server details for each server ID
     const serverIds = user.servers || [];
     const servers = await serversCollection.find({ _id: { $in: serverIds } }).toArray();
-    
+
     res.json({ servers });
   } catch (error) {
     console.error('Get servers error:', error);
@@ -140,37 +140,37 @@ app.get('/api/user/servers', async (req, res) => {
 app.post('/api/servers/join', async (req, res) => {
   try {
     const { userId, inviteCode } = req.body;
-    
+
     if (!userId || !inviteCode) {
       return res.status(400).json({ error: 'User ID and invite code required' });
     }
-    
+
     // Find server by invite code
     const server = await serversCollection.findOne({ inviteCode: inviteCode.toUpperCase() });
     if (!server) {
       return res.status(404).json({ error: 'Invalid invite code' });
     }
-    
+
     const userObjectId = new MongoClient.ObjectId(userId);
-    
+
     // Check if user already in server
     const user = await usersCollection.findOne({ _id: userObjectId });
     if (user.servers && user.servers.includes(server._id)) {
       return res.status(400).json({ error: 'Already a member of this server' });
     }
-    
+
     // Add user to server's members
     await serversCollection.updateOne(
       { _id: server._id },
       { $addToSet: { members: userObjectId } }
     );
-    
+
     // Add server to user's servers
     await usersCollection.updateOne(
       { _id: userObjectId },
       { $addToSet: { servers: server._id } }
     );
-    
+
     res.json({ success: true, server });
   } catch (error) {
     console.error('Join server error:', error);
@@ -182,16 +182,16 @@ app.post('/api/servers/join', async (req, res) => {
 app.post('/api/servers/create', async (req, res) => {
   try {
     const { userId, serverName, inviteCode } = req.body;
-    
+
     if (!userId || !serverName) {
       return res.status(400).json({ error: 'User ID and server name required' });
     }
-    
+
     const userObjectId = new MongoClient.ObjectId(userId);
-    
+
     // Generate invite code if not provided
     const code = inviteCode || serverName.substring(0, 4).toUpperCase() + '-' + Math.random().toString(36).substring(2, 6).toUpperCase();
-    
+
     // Create server
     const result = await serversCollection.insertOne({
       name: serverName,
@@ -204,13 +204,13 @@ app.post('/api/servers/create', async (req, res) => {
         { name: 'general', type: 'text' }
       ]
     });
-    
+
     // Add server to user's servers
     await usersCollection.updateOne(
       { _id: userObjectId },
       { $addToSet: { servers: result.insertedId } }
     );
-    
+
     res.json({ success: true, serverId: result.insertedId, inviteCode: code });
   } catch (error) {
     console.error('Create server error:', error);
@@ -232,24 +232,24 @@ function broadcast(data) {
 
 wss.on('connection', (ws) => {
   console.log('📡 New WebSocket connection');
-  
+
   ws.on('message', async (data) => {
     try {
       const msg = JSON.parse(data);
       console.log('Received:', msg.type);
-      
+
       switch (msg.type) {
         case 'auth':
           clients.set(ws, msg.userId);
           ws.send(JSON.stringify({ type: 'auth_success' }));
           break;
-          
+
         case 'join_channel': {
           const channelId = msg.channelId;
           const messages = await messagesCollection.find({ channelId }).sort({ timestamp: 1 }).toArray();
           const pins = await pinsCollection.find({ channelId }).toArray();
           const reactions = await reactionsCollection.find({ channelId }).toArray();
-          
+
           ws.send(JSON.stringify({
             type: 'history',
             channelId,
@@ -271,7 +271,7 @@ wss.on('connection', (ws) => {
             timestamp: new Date()
           };
           await messagesCollection.insertOne(newMsg);
-          
+
           broadcast({
             type: 'message',
             ...newMsg
@@ -282,7 +282,7 @@ wss.on('connection', (ws) => {
         case 'reaction': {
           const { messageId: rMsgId, emoji, channelId: rChanId, userId: rUserId } = msg;
           const existingReaction = await reactionsCollection.findOne({ messageId: rMsgId, emoji });
-          
+
           if (existingReaction) {
             const users = existingReaction.users || [];
             if (users.includes(rUserId)) {
@@ -298,7 +298,7 @@ wss.on('connection', (ws) => {
               users: [rUserId]
             });
           }
-          
+
           const updatedReactions = await reactionsCollection.find({ messageId: rMsgId }).toArray();
           broadcast({
             type: 'reaction_update',
@@ -315,7 +315,7 @@ wss.on('connection', (ws) => {
             { $set: { channelId: pChanId, content: pContent, author: pAuthor, timestamp: new Date() } },
             { upsert: true }
           );
-          
+
           const allPins = await pinsCollection.find({ channelId: pChanId }).toArray();
           broadcast({
             type: 'pin_added',
@@ -329,7 +329,7 @@ wss.on('connection', (ws) => {
         case 'unpin_message': {
           const { messageId: uMsgId, channelId: uChanId } = msg;
           await pinsCollection.deleteOne({ messageId: uMsgId });
-          
+
           const remainingPins = await pinsCollection.find({ channelId: uChanId }).toArray();
           broadcast({
             type: 'pin_removed',
@@ -368,6 +368,20 @@ wss.on('connection', (ws) => {
         case 'delete_message': {
           const { messageId: dMsgId } = msg;
           await messagesCollection.deleteOne({ _id: dMsgId });
+
+          // Also check if it's pinned and remove it
+          const pinCheck = await pinsCollection.findOne({ messageId: dMsgId });
+          if (pinCheck) {
+            await pinsCollection.deleteOne({ messageId: dMsgId });
+            const remainingPins = await pinsCollection.find({ channelId: pinCheck.channelId }).toArray();
+            broadcast({
+              type: 'pin_removed',
+              messageId: dMsgId,
+              channelId: pinCheck.channelId,
+              pins: remainingPins
+            });
+          }
+
           broadcast({
             type: 'message_deleted',
             messageId: dMsgId
@@ -375,12 +389,12 @@ wss.on('connection', (ws) => {
           break;
         }
       }
-      
+
     } catch (e) {
       console.error('WebSocket error:', e.message);
     }
   });
-  
+
   ws.on('close', () => {
     console.log('❌ WebSocket disconnected');
     clients.delete(ws);
